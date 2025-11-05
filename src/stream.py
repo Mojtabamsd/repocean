@@ -36,7 +36,11 @@ def iter_feature_chunks(h5f: h5py.File, batch_size: int) -> Iterator[Dict]:
 
 def sample_indices_uniform(n: int, k: int, rng: np.random.Generator) -> np.ndarray:
     k = min(k, n)
-    return rng.choice(n, size=k, replace=False)
+    idx = rng.choice(n, size=k, replace=False)
+    # h5py prefers strictly increasing, unique int64 indices
+    idx = np.unique(idx)               # ensure uniqueness
+    idx = np.sort(idx).astype(np.int64, copy=False)
+    return idx
 
 
 def read_rows_by_indices(h5f: h5py.File, indices: np.ndarray) -> Dict:
