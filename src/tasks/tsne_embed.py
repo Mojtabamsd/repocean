@@ -86,8 +86,7 @@ def tsne_across_runs(parent_dir: str,
         init="pca",
         random_state=random_state,
         n_iter=1000,
-        verbose=1,
-        square_distances=True,
+        verbose=1
     )
     emb = tsne.fit_transform(X_pca)
 
