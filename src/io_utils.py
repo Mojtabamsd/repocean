@@ -136,7 +136,6 @@ def load_model_config(yaml_path: str | Path) -> Dict:
 
     important = {
         "architecture_type": tr.get("architecture_type"),
-        "feat_dim": tr.get("feat_dim"),
         "gray": tr.get("gray"),
         "use_norm": tr.get("use_norm"),
         "loss": tr.get("loss"),
@@ -144,9 +143,6 @@ def load_model_config(yaml_path: str | Path) -> Dict:
         "temp": tr.get("temp"),
         "batch_size": tr.get("batch_size"),
         "num_epoch": tr.get("num_epoch"),
-        "im_factor": tr.get("im_factor"),
-        "max_modes": tr.get("max_modes"),
-        "target_size": tr.get("target_size"),
     }
     return {"training_contrastive": important}
 
@@ -156,10 +152,14 @@ def load_run_config(yaml_path: str | Path) -> Dict:
     Parse config.yaml and return at least input_path (original images + TSV metadata).
     """
     yaml_path = Path(yaml_path)
-    with open(yaml_path, "r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f)
+    raw = _read_yaml_relaxed(str(yaml_path))
 
-    input_path = raw.get("input_path")
+    # Extract and normalize input_path
+    input_path = raw.get("input_path") or raw.get("input-dir") or raw.get("data_path")
+    if input_path:
+        # Normalize slashes so they work on any OS
+        input_path = str(Path(input_path))
+
     return {"input_path": input_path}
 
 
@@ -233,9 +233,9 @@ def merge_run(features: np.ndarray,
 
     # add meta columns
     df["run_id"] = run_id
-    df["encoder_name"] = encoder_meta.get("encoder_name", "unknown")
-    df["features_normalized"] = bool(encoder_meta.get("normalized", False))
-    df["feature_dim"] = int(encoder_meta.get("feature_dim") or features.shape[1])
+    # df["encoder_name"] = encoder_meta.get("encoder_name", "unknown")
+    # df["features_normalized"] = bool(encoder_meta.get("normalized", False))
+    # df["feature_dim"] = int(encoder_meta.get("feature_dim") or features.shape[1])
     # model config (only important bits)
     tc = (model_meta or {}).get("training_contrastive", {})
     for k, v in tc.items():
@@ -284,6 +284,7 @@ def load_one_run(run_dir: str | Path) -> Tuple[pd.DataFrame, np.ndarray, Dict]:
         "num_images": features.shape[0],
         "feature_dim": features.shape[1],
         "encoder_name": enc_meta.get("encoder_name", "unknown"),
+        "normalized": bool(enc_meta.get("normalized", False)),
         "features_path": str(feats_path),
         "preds_path": str(preds_path),
         "model_config_path": str(model_cfg_path),
