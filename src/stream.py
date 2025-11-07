@@ -44,11 +44,19 @@ def sample_indices_uniform(n: int, k: int, rng: np.random.Generator) -> np.ndarr
 
 
 def read_rows_by_indices(h5f: h5py.File, indices: np.ndarray) -> Dict:
-    feats = h5f["features"]
-    names = h5f["image_names"]
-    X = feats[indices]                 # fancy indexing: reads only rows needed
-    nm = names[indices].astype(str)
-    return {"features": X, "image_names": nm, "indices": indices}
+    indices = np.asarray(indices, dtype=np.int64).ravel()
+    order = np.argsort(indices)
+    sorted_idx = indices[order]
+
+    feats = h5f["features"][sorted_idx]
+    names = h5f["image_names"][sorted_idx].astype(str)
+
+    # If you ever need original order:
+    # inv = np.empty_like(order)
+    # inv[order] = np.arange(order.size)
+    # feats = feats[inv]; names = names[inv]
+
+    return {"features": feats, "image_names": names, "indices": sorted_idx}
 
 
 def load_predictions_map(csv_path: str | Path, cols: Optional[List[str]]=None) -> pd.DataFrame:
