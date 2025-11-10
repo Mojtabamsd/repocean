@@ -9,6 +9,8 @@ import pandas as pd
 from sklearn.decomposition import IncrementalPCA
 from src.index import build_run_index
 from src.stream import open_h5, get_h5_shapes, read_rows_by_indices
+from src.utils.io import load_run_config
+from src.metadata import load_run_metadata
 
 
 # -------------------------
@@ -34,11 +36,9 @@ def _fit_ipca_basis(
             if n == 0:
                 continue
             k = min(bootstrap_per_run, n)
-            # strictly increasing indices help h5py performance
+            # evenly spaced for stability & sorted for h5py
             idx = np.linspace(0, n - 1, num=k, dtype=np.int64)
-            part = read_rows_by_indices(h5f, idx)
-            X = part["features"]
-            # partial fit on chunks if very large
+            X = read_rows_by_indices(h5f, idx)["features"]
             if X.shape[0] > 4096:
                 for j in range(0, X.shape[0], 4096):
                     ipca.partial_fit(X[j : j + 4096])
@@ -90,103 +90,196 @@ def _window_indices_by_count(n: int, window_size: int, hop: int) -> List[np.ndar
     return idxs
 
 
-# -------------------------
-# Main API
-# -------------------------
+def _build_name_to_index(h5f) -> Dict[str, int]:
+    names = h5f["image_names"][:].astype(str)
+    # map filename only (strip dirs in H5 if present)
+    keys = [n.replace("\\", "/").split("/")[-1] for n in names]
+    return {k: i for i, k in enumerate(keys)}
 
-def run_drift_by_count(
+
+def _depth_bins(values: np.ndarray, bin_size: float) -> Tuple[np.ndarray, np.ndarray]:
+    """Return (bin_ids per value, bin_edges)."""
+    if np.isnan(values).all():
+        return np.full(values.shape, -1, dtype=int), np.array([])
+    vmin = np.nanmin(values)
+    vmax = np.nanmax(values)
+    if not np.isfinite(vmin) or not np.isfinite(vmax) or bin_size <= 0:
+        return np.full(values.shape, -1, dtype=int), np.array([])
+    edges = np.arange(vmin, vmax + bin_size, bin_size)
+    ids = np.digitize(values, edges, right=False) - 1
+    return ids.astype(int), edges
+
+# ---------- Core per-run computation ----------
+
+
+def _project_window(h5f, indices: np.ndarray, sample_per_window: int, ipca: IncrementalPCA) -> np.ndarray:
+    if indices.size == 0:
+        return np.empty((0, ipca.n_components), dtype=np.float32)
+    k = min(sample_per_window, indices.size)
+    # evenly spaced sampling preserves order and saves IO
+    if k < indices.size:
+        sel = np.linspace(indices[0], indices[-1], num=k, dtype=np.int64)
+    else:
+        sel = indices
+    X = read_rows_by_indices(h5f, sel)["features"]
+    if X.shape[1] > ipca.n_components:
+        Xp = ipca.transform(X)
+    else:
+        Xp = X - ipca.mean_
+    return Xp
+
+
+def _drift_from_windows(h5f, windows: List[np.ndarray], sample_per_window: int, ipca: IncrementalPCA) -> List[float]:
+    proj = []
+    for w in windows:
+        Xp = _project_window(h5f, w, sample_per_window, ipca)
+        proj.append(Xp)
+    mmds = []
+    for i in range(len(proj) - 1):
+        if proj[i].shape[0] == 0 or proj[i+1].shape[0] == 0:
+            mmds.append(np.nan)
+        else:
+            mmds.append(_mmd_rbf(proj[i], proj[i+1], gamma=None))
+    return mmds
+
+# ---------- Public API ----------
+
+def run_drift(
     parent_dir: str,
     out_dir: str,
-    window_size: int = 1000,
-    hop: int = 500,
+    mode: str = "count",                  # 'count' | 'depth' | 'profile'
+    window_size: int = 1000,              # for count-mode
+    hop: int = 500,                       # for count-mode
     sample_per_window: int = 400,
     pca_dim: int = 50,
     bootstrap_per_run: int = 2000,
+    depth_bin_size: float = 5.0,          # meters (or same units as object_depth)
     seed: int = 42,
     save_plots: bool = True,
 ) -> Dict[str, str]:
     """
-    Representation drift across each run, using *count-based* sliding windows
-    (no need for timestamps). Good default when chronological filenames/ordering
-    reflect capture sequence in HDF5.
+    Drift over windows defined by:
+      - mode='count': sliding windows over capture sequence (index order)
+      - mode='depth': grouped contiguous bins of object_depth (bin size)
+      - mode='profile': grouped by acq_id (ordered by first appearance)
 
-    Steps per run:
-      1) Build sliding windows of size `window_size` with step `hop`
-      2) From each window, sample up to `sample_per_window` rows (streamed)
-      3) Project with a global IPCA basis (fit once across runs)
-      4) Compute MMD^2 between consecutive windows
-      5) Save a small CSV of drift vs. window index; optional PNG plot
-
-    Returns a dict with 'per_run_dir'.
+    Writes per-run CSV & optional PNG under out_dir/<run_id>/.
     """
+    assert mode in {"count", "depth", "profile"}
     rng = np.random.default_rng(seed)
     runs = build_run_index(parent_dir)
     if runs.empty:
         raise RuntimeError(f"No runs found under: {parent_dir}")
 
-    # Fit a common PCA basis once (small bootstrap per run)
     ipca = _fit_ipca_basis(runs, pca_dim=pca_dim, bootstrap_per_run=bootstrap_per_run, seed=seed)
 
-    out_dirp = Path(out_dir)
-    out_dirp.mkdir(parents=True, exist_ok=True)
+    out_root = Path(out_dir)
+    out_root.mkdir(parents=True, exist_ok=True)
 
     for _, r in runs.iterrows():
         run_id = r["run_id"]
-        feats_path = r["features"]
-
-        with open_h5(feats_path) as h5f:
-            n, d = get_h5_shapes(h5f)
-            if n < window_size:
-                # too small to window — skip gracefully
-                continue
-
-            win_idxs = _window_indices_by_count(n, window_size, hop)
-            if not win_idxs:
-                continue
-
-            # For each window, sample subset and project with IPCA
-            proj_windows: List[np.ndarray] = []
-            for widx in win_idxs:
-                k = min(sample_per_window, widx.size)
-                # choose evenly spaced indices to keep reads sorted + diverse
-                if k < widx.size:
-                    sel = np.linspace(widx[0], widx[-1], num=k, dtype=np.int64)
-                else:
-                    sel = widx
-                part = read_rows_by_indices(h5f, sel)
-                Xw = part["features"]
-                # project
-                if Xw.shape[1] > ipca.n_components:
-                    Xw = ipca.transform(Xw)
-                else:
-                    # if features already <= pca_dim, still center via ipca.mean_
-                    Xw = (Xw - ipca.mean_)  # simple centering
-                proj_windows.append(Xw)
-
-        # Compute drift between consecutive projected windows
-        records = []
-        for i in range(len(proj_windows) - 1):
-            X = proj_windows[i]
-            Y = proj_windows[i + 1]
-            mmd2 = _mmd_rbf(X, Y, gamma=None)
-            records.append({"run_id": run_id, "window_i": i, "window_j": i + 1, "mmd2": mmd2})
-
-        df_run = pd.DataFrame(records)
-        run_dir = out_dirp / run_id
+        run_dir = out_root / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
-        df_path = run_dir / "drift_by_count.csv"
-        df_run.to_csv(df_path, index=False)
 
-        # Optional plot
-        if save_plots and not df_run.empty:
+        with open_h5(r["features"]) as h5f:
+            n, _ = get_h5_shapes(h5f)
+            if n == 0:
+                continue
+
+            if mode == "count":
+                windows = _window_indices_by_count(n, window_size, hop)
+                label_positions = list(range(len(windows)))  # integers for plotting x-axis
+
+            else:
+                # load metadata from input_path (via config.yaml)
+                cfg = load_run_config(r["run_cfg"])
+                meta = load_run_metadata(cfg["input_path"]) if cfg.get("input_path") else pd.DataFrame()
+                name_to_idx = _build_name_to_index(h5f)
+
+                # map metadata rows to H5 indices
+                if not meta.empty:
+                    idxs = []
+                    depths = []
+                    profs = []
+                    for img, row in meta.iterrows():
+                        i = name_to_idx.get(img)
+                        if i is not None:
+                            idxs.append(i)
+                            depths.append(row.get("object_depth", np.nan))
+                            profs.append(row.get("acq_id", None))
+                    if not idxs:
+                        # no overlap between metadata and H5 names
+                        windows, label_positions = [], []
+                    else:
+                        idxs = np.asarray(sorted(idxs), dtype=np.int64)
+                        depths = np.asarray(depths, dtype=float)
+                        profs = np.asarray(profs, dtype=object)
+
+                        if mode == "depth":
+                            # depth bins; within each bin, keep capture order by index
+                            bin_ids, edges = _depth_bins(depths, depth_bin_size)
+                            windows = []
+                            labels = []
+                            for b in np.unique(bin_ids):
+                                if b < 0:
+                                    continue
+                                mask = (bin_ids == b)
+                                group = idxs[mask]
+                                if group.size > 0:
+                                    windows.append(group)
+                                    # use mid-edge (bin center) as x-label
+                                    if edges.size >= (b + 2):
+                                        mid = 0.5 * (edges[b] + edges[b+1])
+                                    else:
+                                        mid = b
+                                    labels.append(mid)
+                            # sort by depth label
+                            order = np.argsort(labels)
+                            windows = [windows[i] for i in order]
+                            label_positions = [labels[i] for i in order]
+
+                        elif mode == "profile":
+                            # group by acq_id; sort groups by first index appearance
+                            dfm = pd.DataFrame({"idx": idxs, "acq_id": profs})
+                            groups = []
+                            labels = []
+                            for g, sub in dfm.groupby("acq_id", dropna=False):
+                                group = np.sort(sub["idx"].values.astype(np.int64))
+                                if group.size > 0:
+                                    groups.append(group)
+                                    labels.append(str(g))
+                            # order groups by first occurrence in capture sequence
+                            first_idx = [g[0] for g in groups]
+                            order = np.argsort(first_idx)
+                            windows = [groups[i] for i in order]
+                            label_positions = [labels[i] for i in order]
+                else:
+                    windows, label_positions = [], []
+
+            # compute drift across consecutive windows
+            mmds = _drift_from_windows(h5f, windows, sample_per_window, ipca)
+
+        # save CSV
+        df = pd.DataFrame({
+            "run_id": run_id,
+            "window_from": label_positions[:len(mmds)],
+            "window_to":   label_positions[1:len(mmds)+1],
+            "mmd2": mmds
+        })
+        csv_path = run_dir / f"drift_{mode}.csv"
+        df.to_csv(csv_path, index=False)
+
+        # optional plot
+        if save_plots and not df.empty:
             import matplotlib.pyplot as plt
             plt.figure(figsize=(8, 3))
-            plt.plot(df_run["window_j"], df_run["mmd2"], marker="o", linewidth=1)
-            plt.title(f"Representation Drift (MMD²) — {run_id}")
-            plt.xlabel("Window index")
+            x = np.arange(len(df))
+            plt.plot(x, df["mmd2"], marker="o", linewidth=1)
+            plt.title(f"Drift ({mode}) — {run_id}")
+            plt.xlabel("Window step")
             plt.ylabel("MMD² (consecutive windows)")
             plt.tight_layout()
-            plt.savefig(run_dir / "drift_by_count.png", dpi=180)
+            plt.savefig(run_dir / f"drift_{mode}.png", dpi=180)
             plt.close()
 
-    return {"per_run_dir": str(out_dirp)}
+    return {"per_run_dir": str(out_root)}
