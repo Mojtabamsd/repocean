@@ -3,18 +3,15 @@ from pathlib import Path
 from typing import List, Dict, Optional
 import pandas as pd
 
-CANDIDATE_NAME_COLS = ["image_name", "filename", "file", "img", "name"]
-DEPTH_COL = "object_depth"
-PROFILE_COL = "acq_id"
+CANDIDATE_NAME_COLS = ["img_file_name", "object_id", "object_lat", "object_lon", "object_date", "object_time", ]
 
 
 def _find_name_column(df: pd.DataFrame) -> Optional[str]:
-    cols = [c for c in df.columns]
+    cols = list(df.columns)
     lower = {c.lower(): c for c in cols}
     for k in CANDIDATE_NAME_COLS:
         if k in lower:
             return lower[k]
-    # heuristic: any column containing 'name' or 'file'
     for c in cols:
         cl = c.lower()
         if "name" in cl or "file" in cl:
@@ -28,48 +25,82 @@ def _normalize_image_name(x: str) -> str:
     return x.split("/")[-1]  # filename only
 
 
-def load_run_metadata(input_path: str | Path) -> pd.DataFrame:
+def load_run_metadata(
+    input_path: str | Path,
+    depth_col: str = "object_depth_min",
+    profile_col: str = "acq_id",
+    extra_depth_aliases: Optional[List[str]] = None,
+) -> pd.DataFrame:
     """
-    Scan input_path for *.tsv, read minimal columns:
-      - image_name (auto-detected column)
-      - object_depth (float, if present)
-      - acq_id (string, if present)
-    Return a DataFrame indexed by normalized image_name.
+    Read *.tsv files under input_path and return a DF with:
+      - image_name (index)
+      - <depth_col> (if present)
+      - <profile_col> (if present)
+
+    You can pass your exact column names. If a chosen column is missing,
+    we will try common aliases (for depth) if provided.
     """
     base = Path(input_path)
     tsvs = sorted(base.glob("*.tsv"))
     frames: List[pd.DataFrame] = []
+
+    # depth fallback aliases (optional)
+    aliases = extra_depth_aliases or ["object_depth", "object_depth_max"]
+
     for tsv in tsvs:
         try:
-            df = pd.read_csv(tsv, sep="\t", dtype=str)  # read as str, cast later
+            df = pd.read_csv(tsv, sep="\t", dtype=str)
         except Exception:
             continue
+
         name_col = _find_name_column(df)
         if not name_col:
             continue
 
         cols = [name_col]
-        if DEPTH_COL in df.columns:
-            cols.append(DEPTH_COL)
-        if PROFILE_COL in df.columns:
-            cols.append(PROFILE_COL)
+        chosen_depth_col = None
+        if depth_col in df.columns:
+            chosen_depth_col = depth_col
+            cols.append(depth_col)
+        else:
+            # try aliases
+            for a in aliases:
+                if a in df.columns:
+                    chosen_depth_col = a
+                    cols.append(a)
+                    break
+
+        chosen_profile_col = None
+        if profile_col in df.columns:
+            chosen_profile_col = profile_col
+            cols.append(profile_col)
 
         sub = df[cols].copy()
         sub.rename(columns={name_col: "image_name"}, inplace=True)
         sub["image_name"] = sub["image_name"].apply(_normalize_image_name)
 
-        # cast depth if present
-        if DEPTH_COL in sub.columns:
-            sub[DEPTH_COL] = pd.to_numeric(sub[DEPTH_COL], errors="coerce")
+        # standardize column names after selection
+        if chosen_depth_col and chosen_depth_col != depth_col:
+            sub.rename(columns={chosen_depth_col: depth_col}, inplace=True)
+        if chosen_profile_col and chosen_profile_col != profile_col:
+            sub.rename(columns={chosen_profile_col: profile_col}, inplace=True)
+
+        # cast depth (if present)
+        if depth_col in sub.columns:
+            sub[depth_col] = pd.to_numeric(sub[depth_col], errors="coerce")
 
         frames.append(sub)
 
     if not frames:
-        # return empty frame with expected columns
-        return pd.DataFrame(columns=["image_name", DEPTH_COL, PROFILE_COL]).set_index("image_name", drop=False)
+        # empty but with expected columns
+        cols = ["image_name"]
+        if depth_col:
+            cols.append(depth_col)
+        if profile_col:
+            cols.append(profile_col)
+        return pd.DataFrame(columns=cols).set_index("image_name", drop=False)
 
     meta = pd.concat(frames, ignore_index=True)
-    # latest rows win if duplicates
     meta = meta.drop_duplicates(subset=["image_name"], keep="last")
     meta = meta.set_index("image_name", drop=False)
     return meta

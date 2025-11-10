@@ -10,8 +10,15 @@ def main():
     # count-mode params
     ap.add_argument("--window_size", type=int, default=1000)
     ap.add_argument("--hop", type=int, default=500)
-    # depth/profile shared params
-    ap.add_argument("--depth_bin_size", type=float, default=5.0, help="Depth bin size (same units as object_depth)")
+
+    # depth/profile mode config
+    ap.add_argument("--depth_bin_size", type=float, default=5.0,
+                    help="Bin size for depth mode (same units as depth column)")
+    ap.add_argument("--depth_col", type=str, default="object_depth_min",
+                    help="Column name to use as depth (default: object_depth_min)")
+    ap.add_argument("--profile_col", type=str, default="acq_id",
+                    help="Column name to use as profile/group id")
+
     # common
     ap.add_argument("--sample_per_window", type=int, default=400)
     ap.add_argument("--pca_dim", type=int, default=50)
@@ -30,6 +37,8 @@ def main():
         pca_dim=args.pca_dim,
         bootstrap_per_run=args.bootstrap_per_run,
         depth_bin_size=args.depth_bin_size,
+        depth_col=args.depth_col,
+        profile_col=args.profile_col,
         seed=args.seed,
         save_plots=not args.no_plots,
     )

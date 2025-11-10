@@ -144,6 +144,7 @@ def _drift_from_windows(h5f, windows: List[np.ndarray], sample_per_window: int, 
 
 # ---------- Public API ----------
 
+
 def run_drift(
     parent_dir: str,
     out_dir: str,
@@ -153,17 +154,17 @@ def run_drift(
     sample_per_window: int = 400,
     pca_dim: int = 50,
     bootstrap_per_run: int = 2000,
-    depth_bin_size: float = 5.0,          # meters (or same units as object_depth)
+    depth_bin_size: float = 5.0,          # meters (or same units as depth column)
+    depth_col: str = "object_depth_min",
+    profile_col: str = "acq_id",
     seed: int = 42,
     save_plots: bool = True,
 ) -> Dict[str, str]:
     """
     Drift over windows defined by:
       - mode='count': sliding windows over capture sequence (index order)
-      - mode='depth': grouped contiguous bins of object_depth (bin size)
-      - mode='profile': grouped by acq_id (ordered by first appearance)
-
-    Writes per-run CSV & optional PNG under out_dir/<run_id>/.
+      - mode='depth': contiguous bins of <depth_col>
+      - mode='profile': groups of <profile_col>
     """
     assert mode in {"count", "depth", "profile"}
     rng = np.random.default_rng(seed)
@@ -193,7 +194,11 @@ def run_drift(
             else:
                 # load metadata from input_path (via config.yaml)
                 cfg = load_run_config(r["run_cfg"])
-                meta = load_run_metadata(cfg["input_path"]) if cfg.get("input_path") else pd.DataFrame()
+                meta = load_run_metadata(
+                    cfg["input_path"],
+                    depth_col=depth_col,
+                    profile_col=profile_col,
+                ) if cfg.get("input_path") else pd.DataFrame()
                 name_to_idx = _build_name_to_index(h5f)
 
                 # map metadata rows to H5 indices
@@ -205,8 +210,9 @@ def run_drift(
                         i = name_to_idx.get(img)
                         if i is not None:
                             idxs.append(i)
-                            depths.append(row.get("object_depth", np.nan))
-                            profs.append(row.get("acq_id", None))
+                            depths.append(row.get(depth_col, np.nan))
+                            profs.append(row.get(profile_col, None))
+
                     if not idxs:
                         # no overlap between metadata and H5 names
                         windows, label_positions = [], []
@@ -216,18 +222,14 @@ def run_drift(
                         profs = np.asarray(profs, dtype=object)
 
                         if mode == "depth":
-                            # depth bins; within each bin, keep capture order by index
                             bin_ids, edges = _depth_bins(depths, depth_bin_size)
-                            windows = []
-                            labels = []
+                            windows, labels = [], []
                             for b in np.unique(bin_ids):
                                 if b < 0:
                                     continue
-                                mask = (bin_ids == b)
-                                group = idxs[mask]
+                                group = idxs[bin_ids == b]
                                 if group.size > 0:
                                     windows.append(group)
-                                    # use mid-edge (bin center) as x-label
                                     if edges.size >= (b + 2):
                                         mid = 0.5 * (edges[b] + edges[b+1])
                                     else:
@@ -239,11 +241,9 @@ def run_drift(
                             label_positions = [labels[i] for i in order]
 
                         elif mode == "profile":
-                            # group by acq_id; sort groups by first index appearance
-                            dfm = pd.DataFrame({"idx": idxs, "acq_id": profs})
-                            groups = []
-                            labels = []
-                            for g, sub in dfm.groupby("acq_id", dropna=False):
+                            dfm = pd.DataFrame({"idx": idxs, "profile": profs})
+                            groups, labels = [], []
+                            for g, sub in dfm.groupby("profile", dropna=False):
                                 group = np.sort(sub["idx"].values.astype(np.int64))
                                 if group.size > 0:
                                     groups.append(group)
@@ -275,7 +275,8 @@ def run_drift(
             plt.figure(figsize=(8, 3))
             x = np.arange(len(df))
             plt.plot(x, df["mmd2"], marker="o", linewidth=1)
-            plt.title(f"Drift ({mode}) — {run_id}")
+            title_label = depth_col if mode == "depth" else profile_col if mode == "profile" else "count"
+            plt.title(f"Drift ({mode}: {title_label}) — {run_id}")
             plt.xlabel("Window step")
             plt.ylabel("MMD² (consecutive windows)")
             plt.tight_layout()
