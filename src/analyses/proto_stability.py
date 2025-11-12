@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from sklearn.decomposition import IncrementalPCA
+from sklearn.metrics import silhouette_score
 import matplotlib.pyplot as plt
 
 from src.index import build_run_index
@@ -340,5 +341,166 @@ def run_prototype_stability(
             safe_g = _safe_slug(str(g))
             plt.savefig(out_root / f"heatmap_mean_hausdorff_{safe_g}.png", dpi=160)
             plt.close()
+
+    return {"out_dir": str(out_root)}
+
+
+def run_prototype_global_stability(
+    parent_dir: str,
+    out_dir: str,
+    pca_dim: int = 50,
+    min_per_class: int = 3,          # at least this many medoids overall to evaluate a class
+    min_runs_for_sil: int = 2,       # need >=2 runs to compute silhouette
+    save_plots: bool = True,
+) -> Dict[str, str]:
+    """
+    Global stability per class across *all runs at once*.
+
+    For each class:
+      - gather all medoid vectors (from all runs)
+      - project to a common PCA space (fit over all medoids)
+      - L2-normalize
+      - compute:
+          * n_runs, n_prototypes
+          * mean distance to global centroid  (compactness; lower is better)
+          * variance (mean feature variance)
+          * silhouette_by_run (runs as labels; higher means runs are separated → worse global stability)
+      - optional 2D scatter (first two PCA components) colored by run_id
+
+    Writes:
+      <out_dir>/_global/proto_stability/global_summary.csv
+      <out_dir>/_global/proto_stability/global_scatter_<class>.png  (optional)
+    """
+    runs = build_run_index(parent_dir)
+    if runs.empty:
+        raise RuntimeError(f"No runs found under: {parent_dir}")
+
+    out_root = Path(out_dir) / "_global" / "proto_stability"
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    # 1) Collect medoids table [run_id, group, medoid_rank, medoid_global_idx, features_path]
+    medoids = _collect_all_medoids(runs, Path(out_dir))
+    if medoids.empty:
+        raise RuntimeError("No prototypes.json found under runs.")
+
+    # 2) Read medoid features per run (only those indices)
+    feats_blocks, class_blocks, runid_blocks = [], [], []
+    for run_id, sub in medoids.groupby("run_id"):
+        idx = sub["medoid_global_idx"].astype(np.int64).values
+        idx_sorted = np.sort(np.unique(idx))
+        X = _read_rows_by_index_list(sub["features_path"].iloc[0], idx_sorted)
+        pos = {v: i for i, v in enumerate(idx_sorted)}
+        X_ord = np.vstack([X[pos[i]] for i in idx])  # original order
+        feats_blocks.append(X_ord)
+        class_blocks.append(sub["group"].astype(str).values)
+        runid_blocks.append(np.array([run_id]*len(sub), dtype=object))
+
+    # stack everything
+    X_all = np.vstack(feats_blocks)                   # [N, D]
+    cls_all = np.concatenate(class_blocks)            # [N]
+    run_all = np.concatenate(runid_blocks)            # [N]
+
+    # 3) Fit a global PCA safely (cap components by available samples & dims)
+    feature_dim = X_all.shape[1]
+    total = X_all.shape[0]
+    if total < 2:
+        raise RuntimeError("Not enough medoids overall for global stability.")
+    n_components = max(2, min(pca_dim, feature_dim, total))
+    ipca = IncrementalPCA(n_components=n_components, batch_size=4096)
+
+    # bootstrap first partial_fit with enough rows
+    if total >= n_components:
+        if total > 4096:
+            ipca.partial_fit(X_all[:max(n_components, 4096)])
+            for j in range(0, total, 4096):
+                ipca.partial_fit(X_all[j:j+4096])
+        else:
+            ipca.partial_fit(X_all)
+    else:
+        # rare; fallback to mean-centering without PCA
+        ipca = None
+
+    # project + normalize
+    if ipca is None:
+        global_mean = X_all.mean(axis=0, keepdims=True)
+        Z_all = _l2_normalize(X_all - global_mean)
+    else:
+        Z_all = _l2_normalize(ipca.transform(X_all) if X_all.shape[1] > ipca.n_components else (X_all - ipca.mean_))
+
+    # helper: cosine distance to centroid = 1 - dot(z, c), both unit
+    def _mean_dist_to_centroid(Z: np.ndarray) -> float:
+        if Z.shape[0] == 0: return float("nan")
+        c = _l2_normalize(Z.mean(axis=0, keepdims=True))[0]
+        sims = Z @ c
+        np.clip(sims, -1.0, 1.0, out=sims)
+        d = 1.0 - sims  # [0,2]
+        return float(np.mean(d))
+
+    # helper: mean variance across dims
+    def _mean_feature_variance(Z: np.ndarray) -> float:
+        if Z.shape[0] <= 1: return float(0.0)
+        return float(np.var(Z, axis=0).mean())
+
+    # 4) Per-class global metrics
+    rows = []
+    for g in sorted(np.unique(cls_all)):
+        mask = (cls_all == g)
+        Zg = Z_all[mask]
+        if Zg.shape[0] < min_per_class:
+            rows.append({
+                "class": g,
+                "n_runs": int(len(np.unique(run_all[mask]))),
+                "n_prototypes": int(Zg.shape[0]),
+                "mean_to_centroid": np.nan,
+                "variance": np.nan,
+                "silhouette_by_run": np.nan,
+            })
+            continue
+
+        n_runs = len(np.unique(run_all[mask]))
+        mean_to_cent = _mean_dist_to_centroid(Zg)
+        var_mean = _mean_feature_variance(Zg)
+
+        # silhouette by run_id (higher → runs are separated → less globally stable)
+        if n_runs >= min_runs_for_sil and Zg.shape[0] >= 2:
+            # euclidean on unit vectors ~ cosine structure
+            try:
+                sil = silhouette_score(Zg, run_all[mask], metric="euclidean")
+            except Exception:
+                sil = np.nan
+        else:
+            sil = np.nan
+
+        rows.append({
+            "class": g,
+            "n_runs": int(n_runs),
+            "n_prototypes": int(Zg.shape[0]),
+            "mean_to_centroid": float(mean_to_cent),
+            "variance": float(var_mean),
+            "silhouette_by_run": float(sil) if sil == sil else np.nan,  # handle nan
+        })
+
+        # Optional scatter (first two PCA dims), colored by run
+        if save_plots and (ipca is not None) and Zg.shape[1] >= 2:
+            # use first two PCA comps BEFORE normalization to keep geometry; use Z_all 2D for consistent scale
+            # (simple: reuse Zg's first two columns)
+            XY = Zg[:, :2]
+            plt.figure(figsize=(5.5, 4.5))
+            runs_g = np.array(run_all[mask])
+            uruns = np.unique(runs_g)
+            for ru in uruns:
+                sel = (runs_g == ru)
+                plt.scatter(XY[sel, 0], XY[sel, 1], s=10, label=str(ru), alpha=0.8)
+            plt.title(f"Global prototypes — {g} (colored by run)")
+            plt.xlabel("PC1"); plt.ylabel("PC2"); plt.legend(markerscale=2, fontsize=7, frameon=False)
+            plt.tight_layout()
+            safe_g = _safe_slug(str(g))
+            plt.savefig(out_root / f"global_scatter_{safe_g}.png", dpi=160)
+            plt.close()
+
+    # 5) Save global summary
+    df = pd.DataFrame(rows)
+    df = df.sort_values(["silhouette_by_run", "mean_to_centroid"], na_position="last").reset_index(drop=True)
+    df.to_csv(out_root / "global_summary.csv", index=False)
 
     return {"out_dir": str(out_root)}
