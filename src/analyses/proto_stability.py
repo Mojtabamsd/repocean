@@ -11,6 +11,31 @@ import matplotlib.pyplot as plt
 
 from src.index import build_run_index
 from src.stream import open_h5
+import re, unicodedata
+
+_WINDOWS_FORBIDDEN = set('<>:"/\\|?*')
+_WINDOWS_RESERVED = {
+    "CON","PRN","AUX","NUL",
+    *(f"COM{i}" for i in range(1,10)),
+    *(f"LPT{i}" for i in range(1,10)),
+}
+
+
+def _safe_slug(name: str, max_len: int = 120) -> str:
+    if name is None:
+        return "unnamed"
+    s = unicodedata.normalize("NFKC", str(name))
+    s = "".join(("_" if ch in _WINDOWS_FORBIDDEN else ch) for ch in s)
+    s = re.sub(r"[\x00-\x1f]", "_", s)     # control chars
+    s = re.sub(r"[ \t]+", "_", s)          # collapse whitespace
+    s = re.sub(r"_+", "_", s).strip("._ ")
+    if not s:
+        s = "unnamed"
+    if s.upper() in _WINDOWS_RESERVED:
+        s = f"_{s}"
+    if len(s) > max_len:
+        s = s[:max_len].rstrip("._ ")
+    return s
 
 # -----------------------
 # IO helpers
@@ -300,7 +325,8 @@ def run_prototype_stability(
             plt.yticks(range(n), runs_g, fontsize=8)
             plt.colorbar(label="mean Hausdorff (cosine)")
             plt.tight_layout()
-            plt.savefig(out_root / f"heatmap_mean_hausdorff_{g}.png", dpi=160)
+            safe_g = _safe_slug(str(g))
+            plt.savefig(out_root / f"heatmap_mean_hausdorff_{safe_g}.png", dpi=160)
             plt.close()
 
     return {"out_dir": str(out_root)}
