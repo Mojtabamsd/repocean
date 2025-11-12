@@ -2,54 +2,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import json
-import re
-import unicodedata
 
 from PIL import Image, ImageDraw, ImageFont
 
 from src.index import build_run_index
 from src.utils.io import load_run_config
-
-
-_WINDOWS_FORBIDDEN = set('<>:"/\\|?*')
-_WINDOWS_RESERVED = {
-    "CON","PRN","AUX","NUL",
-    *(f"COM{i}" for i in range(1,10)),
-    *(f"LPT{i}" for i in range(1,10)),
-}
-
-
-def _safe_slug(name: str, max_len: int = 120) -> str:
-    """
-    Make a Windows-safe filename fragment:
-    - strip/normalize unicode
-    - replace forbidden chars with '_'
-    - collapse whitespace/underscore runs
-    - avoid reserved device names
-    """
-    if name is None:
-        return "unnamed"
-    # normalize unicode
-    s = unicodedata.normalize("NFKC", str(name))
-    # replace forbidden chars with underscore
-    s = "".join(("_" if ch in _WINDOWS_FORBIDDEN else ch) for ch in s)
-    # replace any control chars
-    s = re.sub(r"[\x00-\x1f]", "_", s)
-    # collapse spaces and slashes just in case
-    s = re.sub(r"[ \t]+", "_", s)
-    # collapse multiple underscores
-    s = re.sub(r"_+", "_", s)
-    # strip leading/trailing dots/underscores
-    s = s.strip("._ ")
-    if not s:
-        s = "unnamed"
-    # avoid reserved names (case-insensitive)
-    if s.upper() in _WINDOWS_RESERVED:
-        s = f"_{s}"
-    # truncate to a safe length
-    if len(s) > max_len:
-        s = s[:max_len].rstrip("._ ")
-    return s
+from src.utils.paths import _safe_slug
 
 
 def _index_images_recursive(root: Path, exts=(".bmp", ".jpg", ".jpeg", ".png", ".tif", ".tiff")) -> Dict[str, Path]:

@@ -8,6 +8,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from src.index import build_run_index
 from src.utils.io import load_run_config
+from src.utils.paths import _safe_slug
 
 # ---------- path + filename helpers ----------
 
@@ -20,31 +21,6 @@ def _index_images_recursive(root: Path, exts=(".bmp", ".jpg", ".jpeg", ".png", "
         if p.is_file() and p.suffix.lower() in exts:
             mapping[p.name.lower()] = p
     return mapping
-
-
-_WINDOWS_FORBIDDEN = set('<>:"/\\|?*')
-_WINDOWS_RESERVED = {
-    "CON","PRN","AUX","NUL",
-    *(f"COM{i}" for i in range(1,10)),
-    *(f"LPT{i}" for i in range(1,10)),
-}
-
-
-def _safe_slug(name: str, max_len: int = 120) -> str:
-    if name is None:
-        return "unnamed"
-    s = unicodedata.normalize("NFKC", str(name))
-    s = "".join(("_" if ch in _WINDOWS_FORBIDDEN else ch) for ch in s)
-    s = re.sub(r"[\x00-\x1f]", "_", s)
-    s = re.sub(r"[ \t]+", "_", s)
-    s = re.sub(r"_+", "_", s).strip("._ ")
-    if not s:
-        s = "unnamed"
-    if s.upper() in _WINDOWS_RESERVED:
-        s = f"_{s}"
-    if len(s) > max_len:
-        s = s[:max_len].rstrip("._ ")
-    return s
 
 # ---------- drawing ----------
 

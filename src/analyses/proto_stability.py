@@ -11,32 +11,7 @@ import matplotlib.pyplot as plt
 
 from src.index import build_run_index
 from src.stream import open_h5
-import re, unicodedata
-
-_WINDOWS_FORBIDDEN = set('<>:"/\\|?*')
-_WINDOWS_RESERVED = {
-    "CON","PRN","AUX","NUL",
-    *(f"COM{i}" for i in range(1,10)),
-    *(f"LPT{i}" for i in range(1,10)),
-}
-
-
-def _safe_slug(name: str, max_len: int = 120) -> str:
-    if name is None:
-        return "unnamed"
-    s = unicodedata.normalize("NFKC", str(name))
-    s = "".join(("_" if ch in _WINDOWS_FORBIDDEN else ch) for ch in s)
-    s = re.sub(r"[\x00-\x1f]", "_", s)     # control chars
-    s = re.sub(r"[ \t]+", "_", s)          # collapse whitespace
-    s = re.sub(r"_+", "_", s).strip("._ ")
-    if not s:
-        s = "unnamed"
-    if s.upper() in _WINDOWS_RESERVED:
-        s = f"_{s}"
-    if len(s) > max_len:
-        s = s[:max_len].rstrip("._ ")
-    return s
-
+from src.utils.paths import _safe_slug
 # -----------------------
 # IO helpers
 # -----------------------
