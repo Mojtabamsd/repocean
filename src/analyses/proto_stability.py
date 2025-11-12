@@ -191,21 +191,58 @@ def run_prototype_stability(
         feats_cache[run_id] = X_ord
         idx_cache[run_id] = idx
 
-    # 3) Fit a global PCA on all medoid features, then normalize
+    # 3) Fit a global PCA on all medoid features, then normalize (safe for small counts)
     all_blocks = [feats_cache[rid] for rid in feats_cache]
-    ipca = IncrementalPCA(n_components=pca_dim, batch_size=4096)
-    for X in all_blocks:
-        if X.shape[0] > 4096:
-            for j in range(0, X.shape[0], 4096):
-                ipca.partial_fit(X[j:j+4096])
-        else:
-            ipca.partial_fit(X)
+    if not all_blocks:
+        raise RuntimeError("No medoid features collected.")
+
+    feature_dim = all_blocks[0].shape[1]
+    total_medoids = int(sum(X.shape[0] for X in all_blocks))
+    if total_medoids < 2:
+        # Not enough data to fit PCA — use identity-ish centering later
+        ipca = None
+    else:
+        n_components = max(2, min(pca_dim, feature_dim, total_medoids))
+        ipca = IncrementalPCA(n_components=n_components, batch_size=4096)
+
+        # Bootstrap: first partial_fit must see at least n_components rows
+        buf = []
+        acc = 0
+        blk_idx = 0
+        while blk_idx < len(all_blocks) and acc < n_components:
+            Xb = all_blocks[blk_idx]
+            buf.append(Xb)
+            acc += Xb.shape[0]
+            blk_idx += 1
+        X0 = np.vstack(buf)
+        ipca.partial_fit(X0)
+
+        # Feed remaining (including unused tail of the boot batch is fine to repeat)
+        for i in range(blk_idx, len(all_blocks)):
+            Xb = all_blocks[i]
+            if Xb.shape[0] > 4096:
+                for j in range(0, Xb.shape[0], 4096):
+                    ipca.partial_fit(Xb[j:j + 4096])
+            else:
+                ipca.partial_fit(Xb)
 
     # project & normalize per run
     run_proj: Dict[str, np.ndarray] = {}
-    for rid, X in feats_cache.items():
-        Xp = ipca.transform(X) if X.shape[1] > ipca.n_components else (X - ipca.mean_)
-        run_proj[rid] = _l2_normalize(Xp)
+    if ipca is None:
+        # Not enough data for PCA: just mean-center across all medoids jointly
+        # Compute a global mean for stability
+        global_mean = np.mean(np.vstack(all_blocks), axis=0, keepdims=True)
+        for rid, X in feats_cache.items():
+            Xp = X - global_mean
+            run_proj[rid] = _l2_normalize(Xp)
+    else:
+        for rid, X in feats_cache.items():
+            if X.shape[1] > ipca.n_components:
+                Xp = ipca.transform(X)
+            else:
+                # If feature_dim <= n_components, center using ipca.mean_
+                Xp = X - ipca.mean_
+            run_proj[rid] = _l2_normalize(Xp)
 
     # 4) Build per-run, per-class medoid matrices (projected)
     #    and (optional) coverage distributions from coverage.csv
