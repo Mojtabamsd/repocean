@@ -11,11 +11,31 @@ from src.index import build_run_index
 from src.stream import open_h5, get_h5_shapes, read_rows_by_indices
 from src.utils.io import load_run_config
 from src.metadata import load_run_metadata
-
+from src.utils.paths import _safe_slug
 
 # -------------------------
 # Utilities
 # -------------------------
+
+
+def _cusum(x: np.ndarray, k: float, h: float):
+    """
+    Two-sided CUSUM on mean shifts.
+    x is a 1D series (already mean-centered).
+    k ~ allowance (≈ 0.5*std), h ~ threshold (≈ 4–8*std).
+    """
+    s_pos = np.zeros_like(x, dtype=float)
+    s_neg = np.zeros_like(x, dtype=float)
+    pos_hits, neg_hits = [], []
+    for i in range(1, len(x)):
+        s_pos[i] = max(0.0, s_pos[i-1] + (x[i] - k))
+        s_neg[i] = min(0.0, s_neg[i-1] + (x[i] + k))
+        if s_pos[i] > h:
+            pos_hits.append(i); s_pos[i] = 0.0
+        if s_neg[i] < -h:
+            neg_hits.append(i); s_neg[i] = 0.0
+    return pos_hits, neg_hits
+
 
 def _fit_ipca_basis(
     runs_df: pd.DataFrame,
@@ -159,6 +179,11 @@ def run_drift(
     profile_col: str = "acq_id",
     seed: int = 42,
     save_plots: bool = True,
+    cp_value_col: str = "centroid_dist_mean",
+    cp_k_std: float = 0.5,
+    cp_h_std: float = 5.0,
+    cp_min_gap: int = 3,
+    enable_changepoints: bool = True,
 ) -> Dict[str, str]:
     """
     Drift over windows defined by:
@@ -268,6 +293,61 @@ def run_drift(
         })
         csv_path = run_dir / f"drift_{mode}.csv"
         df.to_csv(csv_path, index=False)
+
+        if enable_changepoints:
+            if not csv_path.exists():
+                pass
+            else:
+                try:
+                    s = pd.read_csv(csv_path)
+                    if cp_value_col in s.columns and len(s[cp_value_col]) >= 5:
+                        y = pd.to_numeric(s[cp_value_col], errors="coerce").astype(float).values
+                        mu = np.nanmean(y);
+                        sd = np.nanstd(y)
+                        if not np.isfinite(sd) or sd == 0:
+                            sd = 1.0
+                        k = cp_k_std * sd
+                        h = cp_h_std * sd
+
+                        pos_hits, neg_hits = _cusum(y - mu, k=k, h=h)
+
+                        # de-duplicate clustered hits (min_gap)
+                        def _dedupe(idxs):
+                            idxs = sorted(int(i) for i in idxs)
+                            keep = []
+                            last = -10 ** 9
+                            for i in idxs:
+                                if i - last >= cp_min_gap:
+                                    keep.append(i)
+                                    last = i
+                            return keep
+
+                        pos_hits = _dedupe(pos_hits)
+                        neg_hits = _dedupe(neg_hits)
+
+                        rows = []
+                        for i in pos_hits: rows.append({"index": i, "type": "up", "value": float(y[i])})
+                        for i in neg_hits: rows.append({"index": i, "type": "down", "value": float(y[i])})
+
+                        cp_csv = csv_path.parent / "changepoints.csv"
+                        pd.DataFrame(rows).to_csv(cp_csv, index=False)
+
+                        if save_plots:
+                            try:
+                                plt.figure(figsize=(8, 4))
+                                plt.plot(y, lw=1)
+                                plt.axhline(mu, ls="--", lw=1, color="gray")
+                                for i in pos_hits: plt.axvline(i, color="red", lw=1, alpha=0.7)
+                                for i in neg_hits: plt.axvline(i, color="blue", lw=1, alpha=0.7)
+                                plt.title(f"Change-points on '{cp_value_col}' (CUSUM)")
+                                plt.tight_layout()
+                                safe_metric = _safe_slug(cp_value_col)
+                                plt.savefig(csv_path.parent / f"changepoints_{safe_metric}.png", dpi=160)
+                                plt.close()
+                            except Exception:
+                                pass
+                except Exception as e:
+                    print(f"[WARN] change-points failed for {csv_path}: {e}")
 
         # optional plot
         if save_plots and not df.empty:
