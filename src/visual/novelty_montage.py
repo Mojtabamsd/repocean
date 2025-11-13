@@ -1,8 +1,7 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
-import re
-import unicodedata
+import os
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 
@@ -12,18 +11,87 @@ from src.utils.paths import _safe_slug
 
 # ---------- path + filename helpers ----------
 
+def _norm_rel_key(p: Path, root: Path) -> str:
+    """Lowercased relative path with forward slashes."""
+    try:
+        rel = p.relative_to(root)
+    except Exception:
+        rel = p
+    return str(rel).replace("\\", "/").lower()
 
-def _index_images_recursive(root: Path, exts=(".bmp", ".jpg", ".jpeg", ".png", ".tif", ".tiff")) -> Dict[str, Path]:
-    mapping: Dict[str, Path] = {}
+def _index_images_recursive(root: Path, exts=(".bmp", ".jpg", ".jpeg", ".png", ".tif", ".tiff")) -> dict:
+    """
+    Build a rich index:
+      - 'by_rel': normalized relative path -> Path (both / and \ keys)
+      - 'by_name': basename (lower) -> Path
+      - 'by_stem': stem (lower) -> [Path, ...]
+    """
+    root = Path(root)
+    index = {"by_rel": {}, "by_name": {}, "by_stem": {}}
     if not root.exists():
-        return mapping
+        return index
+
     for p in root.rglob("*"):
-        if p.is_file() and p.suffix.lower() in exts:
-            mapping[p.name.lower()] = p
-    return mapping
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in exts:
+            continue
+
+        rel_key = _norm_rel_key(p, root)               # e.g. "export__/11/file.bmp"
+        name_key = p.name.lower()                      # e.g. "file.bmp"
+        stem_key = p.stem.lower()                      # e.g. "file"
+
+        index["by_rel"][rel_key] = p
+        index["by_rel"][rel_key.replace("/", "\\")] = p  # allow backslash lookups
+        index["by_name"].setdefault(name_key, p)
+        index["by_stem"].setdefault(stem_key, []).append(p)
+
+    return index
+
+def _resolve_image_path_from_name(name: str, input_root: Path, index: dict) -> Optional[Path]:
+    """
+    Resolve a possibly nested image 'name' against input_root using the rich index.
+    Tries: relative path -> basename -> stem (disambiguate with folder fragments).
+    """
+    if not name:
+        return None
+    key_rel = name.replace("\\", "/").lstrip("./").lower()
+    base = os.path.basename(key_rel).lower()
+    stem = os.path.splitext(base)[0].lower()
+
+    # 1) exact relative path
+    p = index["by_rel"].get(key_rel) or index["by_rel"].get(key_rel.replace("/", "\\"))
+    if p:
+        return p
+
+    # 2) basename
+    p = index["by_name"].get(base)
+    if p:
+        return p
+
+    # 3) stem (tolerate ext mismatch; disambiguate by folder tokens in key_rel)
+    candidates = index["by_stem"].get(stem, [])
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+
+    # disambiguate by folder fragments present in 'name'
+    parts = [q for q in key_rel.split("/") if q and "." not in q]
+    if parts:
+        best = None
+        best_score = -1
+        for c in candidates:
+            c_rel = _norm_rel_key(c, input_root)
+            score = sum(1 for t in parts if t in c_rel)
+            if score > best_score:
+                best, best_score = c, score
+        if best is not None:
+            return best
+
+    return candidates[0]
 
 # ---------- drawing ----------
-
 
 def _make_contact_sheet(
     images: List[Tuple[str, Optional[Path]]],
@@ -77,7 +145,6 @@ def _make_contact_sheet(
 
 # ---------- main ----------
 
-
 def make_novelty_montage_per_run(
     parent_dir: str,
     out_dir: str,
@@ -88,7 +155,7 @@ def make_novelty_montage_per_run(
     """
     For each run:
       - read <run>/novelty/novelty_inbox.csv
-      - resolve abs paths from CSV or input_path scan
+      - resolve abs paths or via recursive index of input_path
       - create PNG montage sorted by score (desc)
     """
     runs = build_run_index(parent_dir)
@@ -112,28 +179,36 @@ def make_novelty_montage_per_run(
             print(f"[WARN] run {run_id}: empty novelty_inbox.csv")
             continue
 
-        # sort by score desc and trim
+        # ensure columns
         cols_needed = ["image_name","abs_path","score","pred1_label","pred1_conf","pred2_label","pred2_conf"]
         for c in cols_needed:
             if c not in df.columns:
-                df[c] = ""  # fill missing
+                df[c] = ""
         df = df.sort_values("score", ascending=False).head(top_n).reset_index(drop=True)
 
-        # scan input_path in case abs_path is missing
+        # prepare index of original images for fallback resolution
         cfg = load_run_config(r["run_cfg"])
-        fmap = _index_images_recursive(Path(cfg["input_path"])) if cfg.get("input_path") else {}
+        input_path = cfg.get("input_path", "")
+        input_root = Path(input_path) if input_path else None
+        idx = _index_images_recursive(input_root) if input_root else {"by_rel": {}, "by_name": {}, "by_stem": {}}
 
         tiles: List[Tuple[str, Optional[Path]]] = []
         for i, row in df.iterrows():
-            name = str(row["image_name"])
+            # Preferred: abs_path if valid
             ap = str(row.get("abs_path", "") or "")
-            pth = Path(ap) if ap and Path(ap).exists() else fmap.get(name.lower())
-            # caption: "#rank score=0.73 detritus (0.92-0.10)"
+            pth = Path(ap) if ap and Path(ap).exists() else None
+
+            # Fallbacks: resolve from image_name against input_path index
+            if pth is None and input_root:
+                name = str(row.get("image_name", "") or "")
+                pth = _resolve_image_path_from_name(name, input_root, idx)
+
+            # caption
             try:
                 c1 = float(row.get("pred1_conf", 0.0))
                 c2 = float(row.get("pred2_conf", 0.0))
                 lab = str(row.get("pred1_label", ""))
-                cap = f"#{i+1} s={row.get('score', 0):.2f} {lab} ({c1:.2f}-{c2:.2f})"
+                cap = f"#{i+1} s={float(row.get('score', 0)):.2f} {lab} ({c1:.2f}-{c2:.2f})"
             except Exception:
                 cap = f"#{i+1} s={row.get('score', 0)} {row.get('pred1_label','')}"
             tiles.append((cap, pth))
