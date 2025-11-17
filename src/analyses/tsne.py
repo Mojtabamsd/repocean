@@ -8,13 +8,7 @@ import matplotlib.pyplot as plt
 
 from src.visual.tools import shorten_label
 from src.index import build_group_index
-from src.stream import (
-    open_h5,
-    get_h5_shapes,
-    sample_indices_uniform,
-    read_rows_by_indices,
-    load_predictions_map,
-)
+from src.analyses.common import collect_group_samples
 
 
 def run_tsne(
@@ -56,65 +50,13 @@ def run_tsne(
     out_root = Path(out_dir) / "tsne"
     out_root.mkdir(parents=True, exist_ok=True)
 
-    for _, g in groups.iterrows():
-        run_id = g["run_id"]
-        group_id = g["group_id"]
-        features_path = g["features"]
-        preds_path = g["preds"]
-
-        with open_h5(features_path) as h5f:
-            n, _ = get_h5_shapes(h5f)
-            if n == 0:
-                continue
-
-            # Decide which indices belong to this group
-            if group_mode == "run":
-                # Use all rows in the H5, like before
-                idx_all = np.arange(n, dtype=np.int64)
-            else:
-                # group_mode == "meta": we have a subset of indices for this group
-                idx_group = g["indices"]
-                if idx_group is None:
-                    continue
-                idx_all = np.asarray(idx_group, dtype=np.int64)
-                if idx_all.size == 0:
-                    continue
-
-            # Sample within this group
-            k = min(sample_per_group, idx_all.size)
-            if k <= 0:
-                continue
-
-            # sample_indices_uniform works on [0, ..., len-1], so map back
-            rel_idx = sample_indices_uniform(idx_all.size, k, rng)
-            sel_idx = np.sort(idx_all[rel_idx])
-
-            part = read_rows_by_indices(h5f, sel_idx)
-            X = part["features"]
-            names = part["image_names"]
-
-        # Minimal join for coloring / metadata
-        preds = load_predictions_map(
-            preds_path,
-            cols=["Image Name", "Top-1 Predicted Label", "Top-1 Confidence Score"],
-        )
-
-        meta = pd.DataFrame({
-            "run_id": run_id,
-            "group_id": group_id if group_mode == "meta" else run_id,
-            "image_name": names,
-            "pred1_label": preds.reindex(names)["pred1_label"].values,
-            "pred1_conf": preds.reindex(names)["pred1_conf"].values,
-        })
-
-        X_parts.append(X)
-        metas.append(meta)
-
-    if not X_parts:
-        raise RuntimeError("No features collected for t-SNE (check grouping and sampling settings).")
-
-    X_all = np.vstack(X_parts)
-    meta_all = pd.concat(metas, ignore_index=True)
+    X_all, meta_all = collect_group_samples(
+        groups=groups,
+        group_mode=group_mode,
+        sample_per_group=sample_per_group,
+        rng=rng,
+        attach_preds=True,
+    )
 
     # PCA first for speed/stability
     if X_all.shape[1] > pca_dim:
