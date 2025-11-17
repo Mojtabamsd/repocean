@@ -221,8 +221,10 @@ def run_drift(
                 cfg = load_run_config(r["run_cfg"])
                 meta = load_run_metadata(
                     cfg["input_path"],
-                    depth_col=depth_col,
-                    profile_col=profile_col,
+                    cols=[depth_col, profile_col],
+                    aliases={
+                        depth_col: ["object_depth", "object_depth_min", "object_depth_max"],
+                    },
                 ) if cfg.get("input_path") else pd.DataFrame()
                 name_to_idx = _build_name_to_index(h5f)
 
