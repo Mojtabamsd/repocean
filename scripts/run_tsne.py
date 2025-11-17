@@ -7,7 +7,9 @@ def main():
     ap.add_argument("--parent", required=True)
     ap.add_argument("--out_csv", required=True)
     ap.add_argument("--out_png", default=None)
-    ap.add_argument("--sample_per_run", type=int, default=2000)
+    ap.add_argument("--group_mode", choices=["run", "meta"], default="run")
+    ap.add_argument("--group_col", default="sample_id")
+    ap.add_argument("--sample_per_group", type=int, default=2000)
     ap.add_argument("--pca_dim", type=int, default=50)
     ap.add_argument("--perplexity", type=float, default=30.0)
     ap.add_argument("--learning_rate", type=float, default=200.0)
@@ -18,7 +20,9 @@ def main():
         parent_dir=args.parent,
         out_csv=args.out_csv,
         out_png=args.out_png,
-        sample_per_run=args.sample_per_run,
+        group_mode=args.group_mode,
+        group_col=args.group_col,
+        sample_per_group=args.sample_per_group,
         pca_dim=args.pca_dim,
         perplexity=args.perplexity,
         learning_rate=args.learning_rate,
