@@ -11,12 +11,8 @@ from sklearn.decomposition import IncrementalPCA
 from sklearn.neighbors import NearestNeighbors
 from scipy.stats import pearsonr
 
-from src.index import build_run_index
-from src.stream import (
-    open_h5, get_h5_shapes,
-    sample_indices_uniform, read_rows_by_indices,
-    load_predictions_map,
-)
+from src.index import build_group_index
+from src.analyses.common import collect_group_samples
 
 # -------------------------
 # Utilities
@@ -107,16 +103,20 @@ def _centroid_distance(X: np.ndarray, labels: np.ndarray) -> np.ndarray:
 # Main API
 # -------------------------
 
+
 def run_purity_analysis(
     parent_dir: str,
     out_dir: str,
-    sample_per_run: int = 2000,
+    group_mode: str = "run",       # "run" | "meta"
+    group_col: str = "sample_id",  # used when group_mode == "meta"
+    sample_per_group: int = 2000,
     pca_dim: int = 50,
     ks: Iterable[int] = (5, 10),
     seed: int = 42,
 ) -> Dict[str, str]:
     """
-    Global kNN purity across all runs (sampled), plus basic geometry-confidence alignment.
+    Global kNN purity across groups (runs or metadata groups), plus basic
+    geometry–confidence alignment.
 
     Steps:
       1) Build run index
@@ -130,105 +130,119 @@ def run_purity_analysis(
     Returns a dict of output file paths.
     """
     rng = np.random.default_rng(seed)
-    runs = build_run_index(parent_dir)
-    if runs.empty:
-        raise RuntimeError(f"No runs found under: {parent_dir}")
 
-    X_parts, meta_parts = [], []
+    # --- Build group index (run-level or metadata-level) ---
+    groups = build_group_index(
+        parent_dir=parent_dir,
+        mode="run" if group_mode == "run" else "meta",
+        group_col=group_col,
+    )
+    if groups.empty:
+        raise RuntimeError(f"No groups found under {parent_dir} (mode={group_mode})")
 
     out_root = Path(out_dir) / "purity"
     out_root.mkdir(parents=True, exist_ok=True)
 
-    # --- Collect sampled features + minimal metadata per run ---
-    for _, r in runs.iterrows():
-        run_id = r["run_id"]
-        with open_h5(r["features"]) as h5f:
-            n, _ = get_h5_shapes(h5f)
-            if n == 0:
-                continue
-            sel = sample_indices_uniform(n, sample_per_run, rng)
-            part = read_rows_by_indices(h5f, sel)
-            X = part["features"]
-            names = part["image_names"]
-
-        preds = load_predictions_map(
-            r["preds"],
-            cols=["Image Name", "Top-1 Predicted Label", "Top-1 Confidence Score"]
-        )
-        # Align predictions only for sampled rows (avoid loading all)
-        pred1_label = preds.reindex(names)["pred1_label"].astype(str).fillna("unknown").values
-        pred1_conf  = preds.reindex(names)["pred1_conf"].astype(float).fillna(0.0).values
-
-        X_parts.append(X)
-        meta_parts.append(pd.DataFrame({
-            "run_id": run_id,
-            "image_name": names,
-            "pred1_label": pred1_label,
-            "pred1_conf": pred1_conf
-        }))
-
-    if not X_parts:
-        raise RuntimeError("No sampled features available; check your runs or sample size.")
-
-    X_all = np.vstack(X_parts)
-    meta = pd.concat(meta_parts, ignore_index=True)
+    # --- Collect sampled features + metadata across all groups ---
+    X_all, meta = collect_group_samples(
+        groups=groups,
+        group_mode=group_mode,
+        sample_per_group=sample_per_group,
+        rng=rng,
+        attach_preds=True,
+    )
 
     # --- PCA reduce for stability/efficiency ---
     X_pca = _fit_pca(X_all, pca_dim=pca_dim)
 
     # --- kNN once at max k ---
     ks = sorted(set(int(k) for k in ks if k >= 1))
+    if not ks:
+        raise ValueError("ks must contain at least one positive integer.")
     kmax = max(ks)
     knn_dist, knn_idx = _build_knn(X_pca, n_neighbors=kmax)
 
     # --- Per-point metrics (vectorized) ---
+    labels = meta["pred1_label"].values
+
     # Purity at each requested k
     for k in ks:
-        pur = _purity_at_k(meta["pred1_label"].values, knn_idx[:, :k])
+        pur = _purity_at_k(labels, knn_idx[:, :k])
         meta[f"purity@{k}"] = pur
 
     # Local density proxy
     meta["local_density"] = _local_density_from_dist(knn_dist)
 
     # Distance to label centroid (computed on PCA space)
-    meta["centroid_dist"] = _centroid_distance(X_pca, meta["pred1_label"].values)
+    meta["centroid_dist"] = _centroid_distance(X_pca, labels)
 
-    # Confidence–geometry correlations (overall)
+    # Confidence–geometry correlations (overall, global)
     try:
-        r_density, p_density = pearsonr(meta["pred1_conf"].values, meta["local_density"].values)
+        r_density, p_density = pearsonr(
+            meta["pred1_conf"].values,
+            meta["local_density"].values,
+        )
     except Exception:
         r_density, p_density = np.nan, np.nan
+
     try:
-        r_centroid, p_centroid = pearsonr(meta["pred1_conf"].values, -meta["centroid_dist"].values)
         # negative distance -> higher is better, so correlate with -dist
+        r_centroid, p_centroid = pearsonr(
+            meta["pred1_conf"].values,
+            -meta["centroid_dist"].values,
+        )
     except Exception:
         r_centroid, p_centroid = np.nan, np.nan
 
-    # --- Aggregates per run ---
+    # --- Aggregates, depending on grouping mode ---
     agg_cols = {f"purity@{k}": ["mean", "std"] for k in ks}
-    agg_cols.update({"local_density": ["mean", "std"], "centroid_dist": ["mean", "std"]})
-    per_run = meta.groupby("run_id").agg(agg_cols)
-    # flatten columns
-    per_run.columns = ["_".join([c] + ([s] if isinstance(s, str) else [])) for c, s in per_run.columns.to_flat_index()]
-    per_run = per_run.reset_index()
+    agg_cols.update({
+        "local_density": ["mean", "std"],
+        "centroid_dist": ["mean", "std"],
+    })
 
-    # attach global correlations (same for all runs, but useful in one place)
-    per_run["corr_conf_local_density_r"] = r_density
-    per_run["corr_conf_local_density_p"] = p_density
-    per_run["corr_conf_centroid_dist_r"] = r_centroid
-    per_run["corr_conf_centroid_dist_p"] = p_centroid
+    if group_mode == "run":
+        # One row per run_id
+        agg = meta.groupby("run_id").agg(agg_cols)
+        agg_index_cols = ["run_id"]
+        out_agg_name = "purity_per_run.csv"
+    else:
+        # group_mode == "meta": one row per (run_id, group_id)
+        if "group_id" not in meta.columns:
+            raise RuntimeError("group_mode='meta' but 'group_id' column not found in metadata.")
+        agg = meta.groupby(["run_id", "group_id"]).agg(agg_cols)
+        agg_index_cols = ["run_id", "group_id"]
+        out_agg_name = "purity_per_group.csv"
+
+    # flatten columns
+    agg.columns = [
+        "_".join([c] + ([s] if isinstance(s, str) else []))
+        for c, s in agg.columns.to_flat_index()
+    ]
+    agg = agg.reset_index()
+
+    # attach global correlations (same for all groups)
+    agg["corr_conf_local_density_r"] = r_density
+    agg["corr_conf_local_density_p"] = p_density
+    agg["corr_conf_centroid_dist_r"] = r_centroid
+    agg["corr_conf_centroid_dist_p"] = p_centroid
 
     # --- Save small artifacts ---
     out_points = out_root / "purity_points.csv"
-    out_runs   = out_root / "purity_per_run.csv"
+    out_agg = out_root / out_agg_name
 
-    # Keep the per-point CSV manageable: it’s only the sample, not full features.
-    # Columns: run_id, image_name, pred1_label, pred1_conf, purity@k, local_density, centroid_dist
-    keep_cols = ["run_id", "image_name", "pred1_label", "pred1_conf", "local_density", "centroid_dist"] + [f"purity@{k}" for k in ks]
+    # Per-point CSV: always saved, includes group_id when in meta mode
+    base_cols = ["run_id", "image_name", "pred1_label", "pred1_conf",
+                 "local_density", "centroid_dist"]
+    if group_mode == "meta" and "group_id" in meta.columns:
+        base_cols.insert(1, "group_id")  # after run_id
+
+    keep_cols = base_cols + [f"purity@{k}" for k in ks]
     meta[keep_cols].to_csv(out_points, index=False)
-    per_run.to_csv(out_runs, index=False)
+    agg.to_csv(out_agg, index=False)
 
     return {
         "points_csv": str(out_points),
-        "per_run_csv": str(out_runs),
+        "agg_csv": str(out_agg),
+        "agg_level": "run" if group_mode == "run" else "group",
     }

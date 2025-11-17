@@ -6,7 +6,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--parent", required=True, help="Folder containing run subfolders")
     ap.add_argument("--out_dir", required=True, help="Directory to write small CSV artifacts")
-    ap.add_argument("--sample_per_run", type=int, default=2000)
+    ap.add_argument("--group_mode", choices=["run", "meta"], default="run")
+    ap.add_argument("--group_col", default="sample_id")
+    ap.add_argument("--sample_per_group", type=int, default=2000)
     ap.add_argument("--pca_dim", type=int, default=50)
     ap.add_argument("--ks", type=int, nargs="+", default=[5, 10], help="k values for purity@k")
     ap.add_argument("--seed", type=int, default=42)
@@ -15,7 +17,9 @@ def main():
     paths = run_purity_analysis(
         parent_dir=args.parent,
         out_dir=args.out_dir,
-        sample_per_run=args.sample_per_run,
+        group_mode=args.group_mode,
+        group_col=args.group_col,
+        sample_per_group=args.sample_per_group,
         pca_dim=args.pca_dim,
         ks=args.ks,
         seed=args.seed,
