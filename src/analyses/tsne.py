@@ -151,7 +151,13 @@ def run_tsne(
             s=3,
             alpha=0.7,
             c=cats.cat.codes,
+            cmap="tab20"
         )
+        cbar = plt.colorbar(sc)
+        cbar.set_label(color_key)
+        cbar.set_ticks(np.arange(len(cats.cat.categories)))
+        cbar.set_ticklabels(cats.cat.categories.to_list())
+
         title_label = f"t-SNE grouped by {color_key}"
         plt.title(title_label)
         plt.xlabel("t-SNE 1")
