@@ -3,7 +3,8 @@ from pathlib import Path
 from typing import List, Dict, Optional
 import pandas as pd
 
-CANDIDATE_NAME_COLS = ["img_file_name", "object_id", "object_lat", "object_lon", "object_date", "object_time", ]
+CANDIDATE_NAME_COLS = ["img_file_name", "object_id", "object_lat", "object_lon", "object_date", "object_time",
+                       "object_depth_min", "object_depth_max", "sample_id"]
 
 
 def _find_name_column(df: pd.DataFrame) -> Optional[str]:
@@ -27,25 +28,30 @@ def _normalize_image_name(x: str) -> str:
 
 def load_run_metadata(
     input_path: str | Path,
-    depth_col: str = "object_depth_min",
-    profile_col: str = "acq_id",
-    extra_depth_aliases: Optional[List[str]] = None,
+    cols: List[str],
+    aliases: Optional[Dict[str, List[str]]] = None,
+    numeric_cols: Optional[List[str]] = None,
 ) -> pd.DataFrame:
     """
-    Read *.tsv files under input_path and return a DF with:
-      - image_name (index)
-      - <depth_col> (if present)
-      - <profile_col> (if present)
+    Parameters
+    ----------
+    input_path : folder containing *.tsv metadata files
+    cols : list of canonical column names you want returned
+    aliases : optional {canonical_name: [list of possible TSV names]}
+    numeric_cols : list of canonical names to cast to numeric
 
-    You can pass your exact column names. If a chosen column is missing,
-    we will try common aliases (for depth) if provided.
+    Returns
+    -------
+    DataFrame indexed by image_name with columns:
+      - image_name
+      - <canonical columns found>
     """
     base = Path(input_path)
     tsvs = sorted(base.glob("*.tsv"))
     frames: List[pd.DataFrame] = []
 
-    # depth fallback aliases (optional)
-    aliases = extra_depth_aliases or ["object_depth", "object_depth_max"]
+    if numeric_cols is None:
+        numeric_cols = []
 
     for tsv in tsvs:
         try:
@@ -53,52 +59,57 @@ def load_run_metadata(
         except Exception:
             continue
 
+        # Try to find the image filename column
         name_col = _find_name_column(df)
         if not name_col:
             continue
 
-        cols = [name_col]
-        chosen_depth_col = None
-        if depth_col in df.columns:
-            chosen_depth_col = depth_col
-            cols.append(depth_col)
-        else:
-            # try aliases
-            for a in aliases:
-                if a in df.columns:
-                    chosen_depth_col = a
-                    cols.append(a)
-                    break
+        # Map canonical column -> actual column found
+        canon_to_actual: Dict[str, str] = {}
+        for canon in cols:
+            actual = None
 
-        chosen_profile_col = None
-        if profile_col in df.columns:
-            chosen_profile_col = profile_col
-            cols.append(profile_col)
+            # Direct match?
+            if canon in df.columns:
+                actual = canon
+            # Alias match?
+            elif aliases and canon in aliases:
+                for alt in aliases[canon]:
+                    if alt in df.columns:
+                        actual = alt
+                        break
 
-        sub = df[cols].copy()
+            if actual is not None:
+                canon_to_actual[canon] = actual
+
+        # Nothing found except image_name?
+        if not canon_to_actual:
+            continue
+
+        # Extract relevant columns
+        sel = [name_col] + list(canon_to_actual.values())
+        sub = df[sel].copy()
+
+        # Normalise filename
         sub.rename(columns={name_col: "image_name"}, inplace=True)
         sub["image_name"] = sub["image_name"].apply(_normalize_image_name)
 
-        # standardize column names after selection
-        if chosen_depth_col and chosen_depth_col != depth_col:
-            sub.rename(columns={chosen_depth_col: depth_col}, inplace=True)
-        if chosen_profile_col and chosen_profile_col != profile_col:
-            sub.rename(columns={chosen_profile_col: profile_col}, inplace=True)
+        # Rename actual → canonical
+        for canon, actual in canon_to_actual.items():
+            if canon != actual:
+                sub.rename(columns={actual: canon}, inplace=True)
 
-        # cast depth (if present)
-        if depth_col in sub.columns:
-            sub[depth_col] = pd.to_numeric(sub[depth_col], errors="coerce")
+        # Cast numeric columns
+        for c in numeric_cols:
+            if c in sub.columns:
+                sub[c] = pd.to_numeric(sub[c], errors="coerce")
 
         frames.append(sub)
 
     if not frames:
-        # empty but with expected columns
-        cols = ["image_name"]
-        if depth_col:
-            cols.append(depth_col)
-        if profile_col:
-            cols.append(profile_col)
-        return pd.DataFrame(columns=cols).set_index("image_name", drop=False)
+        # return empty with canonical names
+        cols_all = ["image_name"] + cols
+        return pd.DataFrame(columns=cols_all).set_index("image_name", drop=False)
 
     meta = pd.concat(frames, ignore_index=True)
     meta = meta.drop_duplicates(subset=["image_name"], keep="last")

@@ -108,7 +108,7 @@ def build_group_index(
             # No metadata path in config; skip this run for meta grouping
             continue
 
-        meta = load_run_metadata(input_path)
+        meta = load_run_metadata(input_path, cols=["sample_id"])
         if meta.empty or group_col not in meta.columns:
             # No usable metadata / column; skip
             continue
