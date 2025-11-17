@@ -146,19 +146,24 @@ def run_tsne(
         color_key = "group_id" if group_mode == "meta" else "run_id"
         cats = out_df[color_key].astype("category")
         short_labels = [shorten_label(str(c)) for c in cats.cat.categories]
-        plt.figure(figsize=(8, 6))
+
+        codes = cats.cat.codes.to_numpy()
+        n_cats = len(cats.cat.categories)
+        cmap = plt.get_cmap("tab20", n_cats)
+        plt.figure(figsize=(12, 8))
         sc = plt.scatter(
             out_df["tsne_x"],
             out_df["tsne_y"],
             s=3,
             alpha=0.7,
-            c=cats.cat.codes,
-            cmap="tab20"
+            c=codes,
+            cmap=cmap,
+            vmin=0,
+            vmax=n_cats - 1,
         )
 
-        cbar = plt.colorbar(sc)
+        cbar = plt.colorbar(sc, ticks=np.arange(n_cats))
         cbar.set_label(color_key)
-        cbar.set_ticks(np.arange(len(cats.cat.categories)))
         cbar.set_ticklabels(short_labels)
 
         title_label = f"t-SNE grouped by {color_key}"
