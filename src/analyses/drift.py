@@ -199,7 +199,7 @@ def run_drift(
 
     ipca = _fit_ipca_basis(runs, pca_dim=pca_dim, bootstrap_per_run=bootstrap_per_run, seed=seed)
 
-    out_root = Path(out_dir)
+    out_root = Path(out_dir) / "drift"
     out_root.mkdir(parents=True, exist_ok=True)
 
     for _, r in runs.iterrows():

@@ -136,6 +136,9 @@ def run_purity_analysis(
 
     X_parts, meta_parts = [], []
 
+    out_root = Path(out_dir) / "purity"
+    out_root.mkdir(parents=True, exist_ok=True)
+
     # --- Collect sampled features + minimal metadata per run ---
     for _, r in runs.iterrows():
         run_id = r["run_id"]
@@ -216,11 +219,8 @@ def run_purity_analysis(
     per_run["corr_conf_centroid_dist_p"] = p_centroid
 
     # --- Save small artifacts ---
-    out_dirp = Path(out_dir)
-    out_dirp.mkdir(parents=True, exist_ok=True)
-
-    out_points = out_dirp / "purity_points.csv"
-    out_runs   = out_dirp / "purity_per_run.csv"
+    out_points = out_root / "purity_points.csv"
+    out_runs   = out_root / "purity_per_run.csv"
 
     # Keep the per-point CSV manageable: it’s only the sample, not full features.
     # Columns: run_id, image_name, pred1_label, pred1_conf, purity@k, local_density, centroid_dist
