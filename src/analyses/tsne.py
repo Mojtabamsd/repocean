@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 from sklearn.decomposition import IncrementalPCA
 from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
 
 from src.visual.tools import shorten_label
 from src.index import build_group_index
@@ -18,8 +19,7 @@ from src.stream import (
 
 def run_tsne(
     parent_dir: str,
-    out_csv: str,
-    out_png: str | None = None,
+    out_dir: str,
     group_mode: str = "run",          # "run" | "meta"
     group_col: str = "sample_id",     # used when group_mode == "meta"
     sample_per_group: int = 2000,
@@ -52,6 +52,9 @@ def run_tsne(
 
     X_parts: list[np.ndarray] = []
     metas: list[pd.DataFrame] = []
+
+    out_root = Path(out_dir) / "tsne"
+    out_root.mkdir(parents=True, exist_ok=True)
 
     for _, g in groups.iterrows():
         run_id = g["run_id"]
@@ -135,14 +138,13 @@ def run_tsne(
     out_df["tsne_y"] = emb[:, 1]
 
     # Save CSV
-    out_csv_path = Path(out_csv)
+    out_csv_path = out_root / f"tsne_{group_mode}.csv"
     out_csv_path.parent.mkdir(parents=True, exist_ok=True)
     out_df.to_csv(out_csv_path, index=False)
 
     # Optional plot
-    if out_png:
-        import matplotlib.pyplot as plt
-
+    save_plot = True
+    if save_plot:
         color_key = "group_id" if group_mode == "meta" else "run_id"
         cats = out_df[color_key].astype("category")
         short_labels = [shorten_label(str(c)) for c in cats.cat.categories]
@@ -171,8 +173,7 @@ def run_tsne(
         plt.xlabel("t-SNE 1")
         plt.ylabel("t-SNE 2")
         plt.tight_layout()
-        Path(out_png).parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(out_png, dpi=200)
+        plt.savefig(out_root / f"tsne_{group_mode}.png", dpi=200)
         plt.close()
 
     return out_df

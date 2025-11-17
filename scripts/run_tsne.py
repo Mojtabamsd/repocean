@@ -5,8 +5,7 @@ from src.analyses.tsne import run_tsne
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--parent", required=True)
-    ap.add_argument("--out_csv", required=True)
-    ap.add_argument("--out_png", default=None)
+    ap.add_argument("--out_dir", required=True, help="Where to write tsne CSVs/PNGs")
     ap.add_argument("--group_mode", choices=["run", "meta"], default="run")
     ap.add_argument("--group_col", default="sample_id")
     ap.add_argument("--sample_per_group", type=int, default=2000)
@@ -18,8 +17,7 @@ def main():
 
     df = run_tsne(
         parent_dir=args.parent,
-        out_csv=args.out_csv,
-        out_png=args.out_png,
+        out_dir=args.out_dir,
         group_mode=args.group_mode,
         group_col=args.group_col,
         sample_per_group=args.sample_per_group,
@@ -29,9 +27,7 @@ def main():
         seed=args.seed,
     )
     print(df.head())
-    print(f"[INFO] Saved t-SNE CSV → {args.out_csv}")
-    if args.out_png:
-        print(f"[INFO] Saved t-SNE plot → {args.out_png}")
+    print(f"[INFO] Saved t-SNE CSV and plot → {args.out_dir}")
 
 
 if __name__ == "__main__":
