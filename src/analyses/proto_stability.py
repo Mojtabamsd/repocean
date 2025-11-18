@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 from src.index import build_run_index
 from src.stream import open_h5
 from src.utils.paths import _safe_slug
+from src.visual.tools import shorten_label, _shorten_for_vis
 # -----------------------
 # IO helpers
 # -----------------------
@@ -230,6 +231,9 @@ def run_prototype_stability(
 
     All outputs go under:
         <out_dir>/_global/proto_stability/
+
+    NOTE: For visualisation we also add shortened columns:
+          class_short, run_*_short, group_*_short, profile_short.
     """
     runs = build_run_index(parent_dir)
     if runs.empty:
@@ -318,10 +322,20 @@ def run_prototype_stability(
                 if counts:
                     coverage_map[(run_id, gid, cls)] = np.array(counts, dtype=float)
 
-    # Convenience aliases
+    # Convenience aliases (full IDs)
     cls_col = medoids["proto_group"].astype(str).values
     run_col = medoids["run_id"].astype(str).values
     grp_col = medoids["group_id"].astype(str).values
+
+    # Short versions for visualisation only
+    classes = sorted(np.unique(cls_col))
+    class_to_short = {c: shorten_label(c) for c in classes}
+
+    unique_runs = np.unique(run_col)
+    run_to_short = {r: _shorten_for_vis(r) for r in unique_runs}
+
+    unique_groups = np.unique(grp_col)
+    group_to_short = {g: _shorten_for_vis(g) for g in unique_groups}
 
     # --------------------------------------------------------------------------
     # 5) Pairwise profile stability per class
@@ -331,7 +345,6 @@ def run_prototype_stability(
         per_key.setdefault((rid, gid, cls), []).append(i)
 
     pairs_rows = []
-    classes = sorted(np.unique(cls_col))
 
     for cls in classes:
         # all profiles (run_id, group_id) that have this class
@@ -369,10 +382,15 @@ def run_prototype_stability(
                 pairs_rows.append(
                     {
                         "class": cls,
+                        "class_short": class_to_short.get(cls, cls),
                         "run_i": ri,
+                        "run_i_short": run_to_short.get(ri, ri),
                         "group_i": gi,
+                        "group_i_short": group_to_short.get(gi, gi),
                         "run_j": rj,
+                        "run_j_short": run_to_short.get(rj, rj),
                         "group_j": gj,
+                        "group_j_short": group_to_short.get(gj, gj),
                         "k_i": int(Xi.shape[0]),
                         "k_j": int(Xj.shape[0]),
                         "centroid_dist": float(centroid_dist),
@@ -398,10 +416,14 @@ def run_prototype_stability(
             )
             .reset_index()
         )
+        class_summary["class_short"] = class_summary["class"].map(
+            lambda c: class_to_short.get(c, c)
+        )
     else:
         class_summary = pd.DataFrame(
             columns=[
                 "class",
+                "class_short",
                 "n_pairs",
                 "mean_centroid_dist",
                 "median_centroid_dist",
@@ -415,28 +437,40 @@ def run_prototype_stability(
     # Optional per-class heatmaps (pairwise mean_hausdorff)
     if save_plots and not pairs.empty:
         for cls, sub in pairs.groupby("class"):
-            profiles = sorted(
+            cls_short = class_to_short.get(cls, cls)
+
+            # Full profile keys for internal mapping
+            profile_keys = sorted(
                 {f"{ri}|{gi}" for ri, gi in zip(sub["run_i"], sub["group_i"])}
                 | {f"{rj}|{gj}" for rj, gj in zip(sub["run_j"], sub["group_j"])}
             )
-            idx_map = {p: i for i, p in enumerate(profiles)}
-            n = len(profiles)
+            idx_map = {p: i for i, p in enumerate(profile_keys)}
+            n = len(profile_keys)
+
+            # Short labels for axis tick display
+            profile_labels = []
+            for key in profile_keys:
+                ri, gi = key.split("|", 1)
+                r_short = run_to_short.get(ri, ri)
+                g_short = group_to_short.get(gi, gi)
+                profile_labels.append(f"{r_short}|{g_short}")
+
             M = np.zeros((n, n), dtype=float)
             for _, row in sub.iterrows():
-                pi = f"{row['run_i']}|{row['group_i']}"
-                pj = f"{row['run_j']}|{row['group_j']}"
-                i = idx_map[pi]
-                j = idx_map[pj]
+                pi_full = f"{row['run_i']}|{row['group_i']}"
+                pj_full = f"{row['run_j']}|{row['group_j']}"
+                i = idx_map[pi_full]
+                j = idx_map[pj_full]
                 M[i, j] = M[j, i] = row["mean_hausdorff"]
 
             plt.figure(figsize=(max(4, n * 0.5), max(3, n * 0.5)))
             plt.imshow(M, interpolation="nearest")
-            plt.title(f"Proto mean-Hausdorff across profiles — {cls}")
-            plt.xticks(range(n), profiles, rotation=90, fontsize=7)
-            plt.yticks(range(n), profiles, fontsize=7)
+            plt.title(f"Proto mean-Hausdorff across profiles — {cls_short}")
+            plt.xticks(range(n), profile_labels, rotation=90, fontsize=7)
+            plt.yticks(range(n), profile_labels, fontsize=7)
             plt.colorbar(label="mean Hausdorff (cosine)")
             plt.tight_layout()
-            safe_cls = _safe_slug(str(cls))
+            safe_cls = _safe_slug(str(cls_short))
             plt.savefig(out_root / f"heatmap_mean_hausdorff_{safe_cls}.png", dpi=160)
             plt.close()
 
@@ -465,13 +499,19 @@ def run_prototype_stability(
         grps_g = grp_col[mask]
 
         n_proto = int(Zg.shape[0])
-        profiles = np.array([f"{r}|{g}" for r, g in zip(runs_g, grps_g)], dtype=object)
-        n_profiles = int(len(np.unique(profiles)))
+        # Full profile IDs for silhouette (no shortening → no collisions)
+        profiles_full = np.array(
+            [f"{r}|{g}" for r, g in zip(runs_g, grps_g)], dtype=object
+        )
+        n_profiles = int(len(np.unique(profiles_full)))
+
+        cls_short = class_to_short.get(cls, cls)
 
         if n_proto < min_per_class:
             global_rows.append(
                 {
                     "class": cls,
+                    "class_short": cls_short,
                     "n_profiles": n_profiles,
                     "n_prototypes": n_proto,
                     "mean_to_centroid": np.nan,
@@ -487,7 +527,7 @@ def run_prototype_stability(
         # silhouette by profile: higher → profiles more separated → less stable
         if n_profiles >= min_profiles_for_sil and Zg.shape[0] >= 2:
             try:
-                sil = silhouette_score(Zg, profiles, metric="euclidean")
+                sil = silhouette_score(Zg, profiles_full, metric="euclidean")
             except Exception:
                 sil = math.nan
         else:
@@ -496,6 +536,7 @@ def run_prototype_stability(
         global_rows.append(
             {
                 "class": cls,
+                "class_short": cls_short,
                 "n_profiles": n_profiles,
                 "n_prototypes": n_proto,
                 "mean_to_centroid": float(mean_to_cent),
@@ -506,19 +547,28 @@ def run_prototype_stability(
             }
         )
 
-        # optional scatter: first two dims, coloured by profile
+        # optional scatter: first two dims, coloured by profile (short labels only for legend)
         if save_plots and Zg.shape[1] >= 2:
             XY = Zg[:, :2]
             plt.figure(figsize=(5.5, 4.5))
-            for prof in np.unique(profiles):
-                sel = profiles == prof
+
+            profiles_short = []
+            for r, g in zip(runs_g, grps_g):
+                rs = run_to_short.get(r, r)
+                gs = group_to_short.get(g, g)
+                profiles_short.append(f"{rs}|{gs}")
+            profiles_short = np.array(profiles_short, dtype=object)
+
+            for prof in np.unique(profiles_short):
+                sel = profiles_short == prof
                 plt.scatter(XY[sel, 0], XY[sel, 1], s=10, label=str(prof), alpha=0.8)
-            plt.title(f"Global prototypes — {cls} (colored by profile)")
+
+            plt.title(f"Global prototypes — {cls_short} (colored by profile)")
             plt.xlabel("PC1")
             plt.ylabel("PC2")
             plt.legend(markerscale=2, fontsize=6, frameon=False)
             plt.tight_layout()
-            safe_cls = _safe_slug(str(cls))
+            safe_cls = _safe_slug(str(cls_short))
             plt.savefig(out_root / f"global_scatter_{safe_cls}.png", dpi=160)
             plt.close()
 

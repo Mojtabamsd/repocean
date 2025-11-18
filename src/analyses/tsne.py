@@ -6,7 +6,6 @@ from sklearn.decomposition import IncrementalPCA
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 
-from src.visual.tools import shorten_label
 from src.index import build_group_index
 from src.analyses.common import collect_group_samples
 
@@ -89,7 +88,6 @@ def run_tsne(
     if save_plot:
         color_key = "group_id" if group_mode == "meta" else "run_id"
         cats = out_df[color_key].astype("category")
-        short_labels = [shorten_label(str(c)) for c in cats.cat.categories]
 
         codes = cats.cat.codes.to_numpy()
         n_cats = len(cats.cat.categories)
@@ -108,7 +106,7 @@ def run_tsne(
 
         cbar = plt.colorbar(sc, ticks=np.arange(n_cats))
         cbar.set_label(color_key)
-        cbar.set_ticklabels(short_labels)
+        cbar.set_ticklabels(cats.cat.categories)
 
         title_label = f"t-SNE grouped by {color_key}"
         plt.title(title_label)
