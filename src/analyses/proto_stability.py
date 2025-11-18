@@ -38,22 +38,89 @@ def _load_coverage_csv(p: Path) -> pd.DataFrame:
 
 def _collect_all_medoids(runs_df: pd.DataFrame, out_dir: Path) -> pd.DataFrame:
     """
-    Returns a tidy table with one row per medoid:
-    [run_id, group, medoid_rank, medoid_global_idx, medoid_name, features_path]
+    Collect medoids across ALL runs and ALL groups (profile_id/sample_id).
+
+    Looks for:
+        <out_dir>/prototypes/<run_id>/**/prototypes_per_class.json
+    and falls back to legacy:
+        <out_dir>/prototypes/<run_id>/prototypes.json
+
+    Returns one row per medoid with:
+      [run_id, group_id, proto_group, medoid_rank, medoid_global_idx,
+       medoid_name, features_path]
     """
     rows = []
     for _, r in runs_df.iterrows():
         run_id = r["run_id"]
-        proto_p = Path(out_dir) / run_id / "prototypes" / "prototypes.json"
-        dfp = _load_prototypes_json(proto_p)
-        if dfp.empty:
+        base_dir = out_dir / "prototypes" / run_id
+        if not base_dir.exists():
             continue
-        dfp["run_id"] = run_id
-        dfp["features_path"] = r["features"]
-        rows.append(dfp[["run_id","group","medoid_rank","medoid_global_idx","medoid_name","features_path"]])
-    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(
-        columns=["run_id","group","medoid_rank","medoid_global_idx","medoid_name","features_path"]
-    )
+
+        # New layout: nested per-group per-class prototypes
+        proto_paths = sorted(base_dir.rglob("prototypes_per_class.json"))
+
+        # Legacy fallback: single prototypes.json in run folder
+        if not proto_paths:
+            legacy = base_dir / "prototypes.json"
+            if legacy.exists():
+                proto_paths = [legacy]
+
+        for p in proto_paths:
+            dfp = _load_prototypes_json(p)
+            if dfp.empty:
+                continue
+
+            # Ensure columns exist
+            if "run_id" not in dfp.columns:
+                dfp["run_id"] = run_id
+
+            # group_id: if not present, derive from folder or fall back to run_id
+            if "group_id" not in dfp.columns:
+                try:
+                    rel = p.parent.relative_to(base_dir)
+                    group_label = "" if str(rel) == "." else str(rel)
+                except ValueError:
+                    group_label = ""
+                dfp["group_id"] = group_label if group_label else run_id
+
+            # proto_group: class label; legacy used "group" for that
+            if "proto_group" not in dfp.columns:
+                if "group" in dfp.columns:
+                    dfp["proto_group"] = dfp["group"]
+                else:
+                    dfp["proto_group"] = "__ALL__"
+
+            # Feature file for this run
+            dfp["features_path"] = r["features"]
+
+            rows.append(
+                dfp[
+                    [
+                        "run_id",
+                        "group_id",
+                        "proto_group",
+                        "medoid_rank",
+                        "medoid_global_idx",
+                        "medoid_name",
+                        "features_path",
+                    ]
+                ]
+            )
+
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "run_id",
+                "group_id",
+                "proto_group",
+                "medoid_rank",
+                "medoid_global_idx",
+                "medoid_name",
+                "features_path",
+            ]
+        )
+
+    return pd.concat(rows, ignore_index=True)
 
 
 def _read_rows_by_index_list(h5_path: str, idx_list: np.ndarray) -> np.ndarray:
@@ -131,15 +198,38 @@ def run_prototype_stability(
     parent_dir: str,
     out_dir: str,
     pca_dim: int = 50,
+    min_per_class: int = 3,       # at least this many medoids overall to evaluate a class globally
+    min_profiles_for_sil: int = 2,
     save_plots: bool = True,
 ) -> Dict[str, str]:
     """
-    Reads per-run prototypes and computes stability/coverage metrics across runs, per class.
+    Prototype stability across ALL prototype folders (runs + nested group_id/profile_id).
 
-    Outputs under <out_dir>/_global/proto_stability/ :
-      - pairs.csv           : class, run_i, run_j, centroid_dist, mean_hausdorff, js_divergence (if coverage present), k_i, k_j
-      - class_summary.csv   : per-class averages across pairs
-      - (optional) heatmaps per class for pairwise distances
+    Uses per-class prototypes (prototypes_per_class.json where available, otherwise
+    falls back to legacy prototypes.json).
+
+    Two levels of analysis:
+
+      1) Pairwise stability per class across profiles (run_id, group_id):
+
+         - centroid distance between profile medoid sets
+         - mean symmetric Hausdorff distance
+         - Jensen–Shannon divergence of coverage (if coverage_per_class.csv exists)
+
+         -> writes: pairs_profiles.csv, class_summary.csv
+
+      2) Global stability per class:
+
+         - n_profiles, n_prototypes
+         - mean distance to global centroid
+         - mean feature variance
+         - silhouette_by_profile (profiles as labels; higher = more separated = less stable)
+
+         -> writes: global_summary.csv
+         -> optional scatter plots (first 2 PCA dims) coloured by profile
+
+    All outputs go under:
+        <out_dir>/_global/proto_stability/
     """
     runs = build_run_index(parent_dir)
     if runs.empty:
@@ -148,111 +238,74 @@ def run_prototype_stability(
     out_root = Path(out_dir) / "_global" / "proto_stability"
     out_root.mkdir(parents=True, exist_ok=True)
 
-    # 1) Gather all medoids across runs
+    # 1) Collect medoids table across all runs & groups
     medoids = _collect_all_medoids(runs, Path(out_dir))
     if medoids.empty:
-        raise RuntimeError("No prototypes.json found under runs.")
+        raise RuntimeError("No prototypes_per_class.json / prototypes.json found under runs.")
 
-    # 2) Load medoid features per run (once) and attach to table
-    feats_cache: Dict[str, np.ndarray] = {}  # key: f"{run_id}"
-    idx_cache: Dict[str, np.ndarray] = {}    # the indices we used
+    # 2) Read medoid features per run into a single aligned matrix X_all
+    n_rows = len(medoids)
+    X_all = None
+    feature_dim = None
+
     for run_id, sub in medoids.groupby("run_id"):
         idx = sub["medoid_global_idx"].astype(np.int64).values
-        # sorted unique to read efficiently, then map back order
         idx_sorted = np.sort(np.unique(idx))
         X = _read_rows_by_index_list(sub["features_path"].iloc[0], idx_sorted)
-        # map back to original row order
-        pos = {v: i for i, v in enumerate(idx_sorted)}
-        X_ord = np.vstack([X[pos[i]] for i in idx])
-        feats_cache[run_id] = X_ord
-        idx_cache[run_id] = idx
+        if feature_dim is None:
+            feature_dim = X.shape[1]
+            X_all = np.zeros((n_rows, feature_dim), dtype=X.dtype)
 
-    # 3) Fit a global PCA on all medoid features, then normalize (safe for small counts)
-    all_blocks = [feats_cache[rid] for rid in feats_cache]
-    if not all_blocks:
+        pos = {v: i for i, v in enumerate(idx_sorted)}
+        # fill rows in X_all at positions corresponding to medoids' global indices in the DF
+        for df_idx, gidx in zip(sub.index.values, idx):
+            X_all[df_idx] = X[pos[gidx]]
+
+    if X_all is None or feature_dim is None:
         raise RuntimeError("No medoid features collected.")
 
-    feature_dim = all_blocks[0].shape[1]
-    total_medoids = int(sum(X.shape[0] for X in all_blocks))
+    # 3) Fit global PCA and normalize
+    total_medoids = X_all.shape[0]
     if total_medoids < 2:
-        # Not enough data to fit PCA — use identity-ish centering later
+        raise RuntimeError("Not enough medoids for stability analysis.")
+
+    feature_dim = X_all.shape[1]
+    n_components = max(2, min(pca_dim, feature_dim, total_medoids))
+    ipca = IncrementalPCA(n_components=n_components, batch_size=4096)
+
+    if total_medoids >= n_components:
+        if total_medoids > 4096:
+            ipca.partial_fit(X_all[: max(n_components, 4096)])
+            for j in range(0, total_medoids, 4096):
+                ipca.partial_fit(X_all[j : j + 4096])
+        else:
+            ipca.partial_fit(X_all)
+    else:
         ipca = None
-    else:
-        n_components = max(2, min(pca_dim, feature_dim, total_medoids))
-        ipca = IncrementalPCA(n_components=n_components, batch_size=4096)
 
-        # Bootstrap: first partial_fit must see at least n_components rows
-        buf = []
-        acc = 0
-        blk_idx = 0
-        while blk_idx < len(all_blocks) and acc < n_components:
-            Xb = all_blocks[blk_idx]
-            buf.append(Xb)
-            acc += Xb.shape[0]
-            blk_idx += 1
-        X0 = np.vstack(buf)
-        ipca.partial_fit(X0)
-
-        # Feed remaining (including unused tail of the boot batch is fine to repeat)
-        for i in range(blk_idx, len(all_blocks)):
-            Xb = all_blocks[i]
-            if Xb.shape[0] > 4096:
-                for j in range(0, Xb.shape[0], 4096):
-                    ipca.partial_fit(Xb[j:j + 4096])
-            else:
-                ipca.partial_fit(Xb)
-
-    # project & normalize per run
-    run_proj: Dict[str, np.ndarray] = {}
     if ipca is None:
-        # Not enough data for PCA: just mean-center across all medoids jointly
-        # Compute a global mean for stability
-        global_mean = np.mean(np.vstack(all_blocks), axis=0, keepdims=True)
-        for rid, X in feats_cache.items():
-            Xp = X - global_mean
-            run_proj[rid] = _l2_normalize(Xp)
+        global_mean = X_all.mean(axis=0, keepdims=True)
+        Z_all = _l2_normalize(X_all - global_mean)
     else:
-        for rid, X in feats_cache.items():
-            if X.shape[1] > ipca.n_components:
-                Xp = ipca.transform(X)
-            else:
-                # If feature_dim <= n_components, center using ipca.mean_
-                Xp = X - ipca.mean_
-            run_proj[rid] = _l2_normalize(Xp)
+        if X_all.shape[1] > ipca.n_components:
+            Z_all = _l2_normalize(ipca.transform(X_all))
+        else:
+            Z_all = _l2_normalize(X_all - ipca.mean_)
 
-    # 4) Build per-run, per-class medoid matrices (projected)
-    #    and (optional) coverage distributions from coverage.csv
-    per = {}  # per[(run_id, class)] = {"X": [k,d], "counts": [k] or None}
+    # 4) Build coverage map: (run_id, group_id, proto_group) -> counts array
+    coverage_map: Dict[Tuple[str, str, str], np.ndarray] = {}
     for _, r in runs.iterrows():
         run_id = r["run_id"]
-        proto_p = Path(out_dir) / run_id / "prototypes" / "prototypes.json"
-        cov_p   = Path(out_dir) / run_id / "prototypes" / "coverage.csv"
-        dfp = _load_prototypes_json(proto_p)
-        if dfp.empty:
+        base_dir = Path(out_dir) / "prototypes" / run_id
+        if not base_dir.exists():
             continue
-        dfp = dfp.sort_values(["group","medoid_rank"]).reset_index(drop=True)
-        Xrun = run_proj[run_id]
-        # attach projected rows by original row order in medoids DF
-        # medoids table has rows aligned with feats_cache ordering already
-        # we reindex dfp to the order in 'medoids' subset for this run
-        sub_all = medoids[medoids.run_id == run_id].reset_index(drop=True)
-        # index in sub_all per (group, medoid_rank)
-        key_to_pos = {(g, int(mr)): i for i, (g, mr) in enumerate(zip(sub_all["group"], sub_all["medoid_rank"]))}
-        # order indices for this dfp
-        pos = [key_to_pos.get((g, int(mr)), None) for g, mr in zip(dfp["group"], dfp["medoid_rank"])]
-        ok_mask = [p is not None for p in pos]
-        dfp = dfp.loc[ok_mask].reset_index(drop=True)
-        pos = [p for p in pos if p is not None]
-        Xmed = Xrun[np.array(pos, dtype=np.int64)]
-        # counts (optional)
-        cov = _load_coverage_csv(cov_p)
-        counts_map = {}
-        if not cov.empty:
+        for cov_path in base_dir.rglob("coverage_per_class.csv"):
+            cov = _load_coverage_csv(cov_path)
+            if cov.empty:
+                continue
             for _, row in cov.iterrows():
-                g = row.get("group", None)
-                if g is None:
-                    continue
-                # collect medoid_i_count in medoid_rank order
+                gid = str(row.get("group_id", run_id))
+                cls = str(row.get("proto_group", row.get("group", "__ALL__")))
                 counts = []
                 i = 0
                 while True:
@@ -262,245 +315,218 @@ def run_prototype_stability(
                         i += 1
                     else:
                         break
-                counts_map[str(g)] = np.array(counts, dtype=float)
+                if counts:
+                    coverage_map[(run_id, gid, cls)] = np.array(counts, dtype=float)
 
-        # stash per class
-        for g in dfp["group"].unique():
-            sel = dfp["group"] == g
-            Xg = Xmed[sel.values]
-            cts = counts_map.get(str(g), None)
-            per[(run_id, str(g))] = {"X": Xg, "counts": cts}
+    # Convenience aliases
+    cls_col = medoids["proto_group"].astype(str).values
+    run_col = medoids["run_id"].astype(str).values
+    grp_col = medoids["group_id"].astype(str).values
 
-    # 5) Pairwise comparisons per class across runs
+    # --------------------------------------------------------------------------
+    # 5) Pairwise profile stability per class
+    # --------------------------------------------------------------------------
+    per_key = {}  # (run_id, group_id, class) -> indices in Z_all
+    for i, (rid, gid, cls) in enumerate(zip(run_col, grp_col, cls_col)):
+        per_key.setdefault((rid, gid, cls), []).append(i)
+
     pairs_rows = []
-    classes = sorted({g for (_, g) in per.keys()})
-    for g in classes:
-        # runs that have this class
-        runs_g = [rid for (rid, cg) in per.keys() if cg == g]
-        runs_g = sorted(set(runs_g))
-        for i in range(len(runs_g)):
-            for j in range(i + 1, len(runs_g)):
-                ri, rj = runs_g[i], runs_g[j]
-                Xi = per[(ri, g)]["X"]; Xj = per[(rj, g)]["X"]
-                ci = _centroid(Xi); cj = _centroid(Xj)
+    classes = sorted(np.unique(cls_col))
+
+    for cls in classes:
+        # all profiles (run_id, group_id) that have this class
+        profiles = sorted({(r, g) for (r, g, c) in per_key.keys() if c == cls})
+        for i in range(len(profiles)):
+            for j in range(i + 1, len(profiles)):
+                (ri, gi) = profiles[i]
+                (rj, gj) = profiles[j]
+
+                idx_i = per_key[(ri, gi, cls)]
+                idx_j = per_key[(rj, gj, cls)]
+                Xi = Z_all[idx_i]
+                Xj = Z_all[idx_j]
+
+                if Xi.size == 0 or Xj.size == 0:
+                    continue
+
+                ci = _centroid(Xi)
+                cj = _centroid(Xj)
                 centroid_dist = _cosine_dist(ci, cj)
                 mean_haus = _mean_symmetric_hausdorff(Xi, Xj)
+
                 # coverage divergence if both have counts
                 jsd = math.nan
-                ci_counts = per[(ri, g)]["counts"]
-                cj_counts = per[(rj, g)]["counts"]
-                if ci_counts is not None and cj_counts is not None and ci_counts.sum() > 0 and cj_counts.sum() > 0:
+                ci_counts = coverage_map.get((ri, gi, cls))
+                cj_counts = coverage_map.get((rj, gj, cls))
+                if (
+                    ci_counts is not None
+                    and cj_counts is not None
+                    and ci_counts.sum() > 0
+                    and cj_counts.sum() > 0
+                ):
                     jsd = _js_divergence(ci_counts, cj_counts)
-                pairs_rows.append({
-                    "class": g,
-                    "run_i": ri, "run_j": rj,
-                    "k_i": int(Xi.shape[0]), "k_j": int(Xj.shape[0]),
-                    "centroid_dist": float(centroid_dist),
-                    "mean_hausdorff": float(mean_haus),
-                    "js_divergence": jsd,
-                })
+
+                pairs_rows.append(
+                    {
+                        "class": cls,
+                        "run_i": ri,
+                        "group_i": gi,
+                        "run_j": rj,
+                        "group_j": gj,
+                        "k_i": int(Xi.shape[0]),
+                        "k_j": int(Xj.shape[0]),
+                        "centroid_dist": float(centroid_dist),
+                        "mean_hausdorff": float(mean_haus),
+                        "js_divergence": jsd,
+                    }
+                )
 
     pairs = pd.DataFrame(pairs_rows)
-    pairs.to_csv(out_root / "pairs.csv", index=False)
+    pairs.to_csv(out_root / "pairs_profiles.csv", index=False)
 
-    # 6) Per-class summary
+    # Per-class summary from pairs
     if not pairs.empty:
-        aggs = pairs.groupby("class").agg(
-            n_pairs=("class","size"),
-            mean_centroid_dist=("centroid_dist","mean"),
-            median_centroid_dist=("centroid_dist","median"),
-            mean_hausdorff=("mean_hausdorff","mean"),
-            median_hausdorff=("mean_hausdorff","median"),
-            mean_js=("js_divergence","mean")
-        ).reset_index()
+        class_summary = (
+            pairs.groupby("class")
+            .agg(
+                n_pairs=("class", "size"),
+                mean_centroid_dist=("centroid_dist", "mean"),
+                median_centroid_dist=("centroid_dist", "median"),
+                mean_hausdorff=("mean_hausdorff", "mean"),
+                median_hausdorff=("mean_hausdorff", "median"),
+                mean_js=("js_divergence", "mean"),
+            )
+            .reset_index()
+        )
     else:
-        aggs = pd.DataFrame(columns=[
-            "class","n_pairs","mean_centroid_dist","median_centroid_dist",
-            "mean_hausdorff","median_hausdorff","mean_js"
-        ])
-    aggs.to_csv(out_root / "class_summary.csv", index=False)
+        class_summary = pd.DataFrame(
+            columns=[
+                "class",
+                "n_pairs",
+                "mean_centroid_dist",
+                "median_centroid_dist",
+                "mean_hausdorff",
+                "median_hausdorff",
+                "mean_js",
+            ]
+        )
+    class_summary.to_csv(out_root / "class_summary.csv", index=False)
 
-    # 7) Optional per-class heatmaps (pairwise distances)
+    # Optional per-class heatmaps (pairwise mean_hausdorff)
     if save_plots and not pairs.empty:
-        for g, sub in pairs.groupby("class"):
-            runs_g = sorted(set(sub["run_i"]).union(set(sub["run_j"])))
-            idx = {rid: i for i, rid in enumerate(runs_g)}
-            # fill matrices
-            n = len(runs_g)
+        for cls, sub in pairs.groupby("class"):
+            profiles = sorted(
+                {f"{ri}|{gi}" for ri, gi in zip(sub["run_i"], sub["group_i"])}
+                | {f"{rj}|{gj}" for rj, gj in zip(sub["run_j"], sub["group_j"])}
+            )
+            idx_map = {p: i for i, p in enumerate(profiles)}
+            n = len(profiles)
             M = np.zeros((n, n), dtype=float)
             for _, row in sub.iterrows():
-                i = idx[row["run_i"]]; j = idx[row["run_j"]]
+                pi = f"{row['run_i']}|{row['group_i']}"
+                pj = f"{row['run_j']}|{row['group_j']}"
+                i = idx_map[pi]
+                j = idx_map[pj]
                 M[i, j] = M[j, i] = row["mean_hausdorff"]
-            plt.figure(figsize=(max(4, n*0.5), max(3, n*0.5)))
+
+            plt.figure(figsize=(max(4, n * 0.5), max(3, n * 0.5)))
             plt.imshow(M, interpolation="nearest")
-            plt.title(f"Proto mean-Hausdorff across runs — {g}")
-            plt.xticks(range(n), runs_g, rotation=90, fontsize=8)
-            plt.yticks(range(n), runs_g, fontsize=8)
+            plt.title(f"Proto mean-Hausdorff across profiles — {cls}")
+            plt.xticks(range(n), profiles, rotation=90, fontsize=7)
+            plt.yticks(range(n), profiles, fontsize=7)
             plt.colorbar(label="mean Hausdorff (cosine)")
             plt.tight_layout()
-            safe_g = _safe_slug(str(g))
-            plt.savefig(out_root / f"heatmap_mean_hausdorff_{safe_g}.png", dpi=160)
+            safe_cls = _safe_slug(str(cls))
+            plt.savefig(out_root / f"heatmap_mean_hausdorff_{safe_cls}.png", dpi=160)
             plt.close()
 
-    return {"out_dir": str(out_root)}
-
-
-def run_prototype_global_stability(
-    parent_dir: str,
-    out_dir: str,
-    pca_dim: int = 50,
-    min_per_class: int = 3,          # at least this many medoids overall to evaluate a class
-    min_runs_for_sil: int = 2,       # need >=2 runs to compute silhouette
-    save_plots: bool = True,
-) -> Dict[str, str]:
-    """
-    Global stability per class across *all runs at once*.
-
-    For each class:
-      - gather all medoid vectors (from all runs)
-      - project to a common PCA space (fit over all medoids)
-      - L2-normalize
-      - compute:
-          * n_runs, n_prototypes
-          * mean distance to global centroid  (compactness; lower is better)
-          * variance (mean feature variance)
-          * silhouette_by_run (runs as labels; higher means runs are separated → worse global stability)
-      - optional 2D scatter (first two PCA components) colored by run_id
-
-    Writes:
-      <out_dir>/_global/proto_stability/global_summary.csv
-      <out_dir>/_global/proto_stability/global_scatter_<class>.png  (optional)
-    """
-    runs = build_run_index(parent_dir)
-    if runs.empty:
-        raise RuntimeError(f"No runs found under: {parent_dir}")
-
-    out_root = Path(out_dir) / "_global" / "proto_stability"
-    out_root.mkdir(parents=True, exist_ok=True)
-
-    # 1) Collect medoids table [run_id, group, medoid_rank, medoid_global_idx, features_path]
-    medoids = _collect_all_medoids(runs, Path(out_dir))
-    if medoids.empty:
-        raise RuntimeError("No prototypes.json found under runs.")
-
-    # 2) Read medoid features per run (only those indices)
-    feats_blocks, class_blocks, runid_blocks = [], [], []
-    for run_id, sub in medoids.groupby("run_id"):
-        idx = sub["medoid_global_idx"].astype(np.int64).values
-        idx_sorted = np.sort(np.unique(idx))
-        X = _read_rows_by_index_list(sub["features_path"].iloc[0], idx_sorted)
-        pos = {v: i for i, v in enumerate(idx_sorted)}
-        X_ord = np.vstack([X[pos[i]] for i in idx])  # original order
-        feats_blocks.append(X_ord)
-        class_blocks.append(sub["group"].astype(str).values)
-        runid_blocks.append(np.array([run_id]*len(sub), dtype=object))
-
-    # stack everything
-    X_all = np.vstack(feats_blocks)                   # [N, D]
-    cls_all = np.concatenate(class_blocks)            # [N]
-    run_all = np.concatenate(runid_blocks)            # [N]
-
-    # 3) Fit a global PCA safely (cap components by available samples & dims)
-    feature_dim = X_all.shape[1]
-    total = X_all.shape[0]
-    if total < 2:
-        raise RuntimeError("Not enough medoids overall for global stability.")
-    n_components = max(2, min(pca_dim, feature_dim, total))
-    ipca = IncrementalPCA(n_components=n_components, batch_size=4096)
-
-    # bootstrap first partial_fit with enough rows
-    if total >= n_components:
-        if total > 4096:
-            ipca.partial_fit(X_all[:max(n_components, 4096)])
-            for j in range(0, total, 4096):
-                ipca.partial_fit(X_all[j:j+4096])
-        else:
-            ipca.partial_fit(X_all)
-    else:
-        # rare; fallback to mean-centering without PCA
-        ipca = None
-
-    # project + normalize
-    if ipca is None:
-        global_mean = X_all.mean(axis=0, keepdims=True)
-        Z_all = _l2_normalize(X_all - global_mean)
-    else:
-        Z_all = _l2_normalize(ipca.transform(X_all) if X_all.shape[1] > ipca.n_components else (X_all - ipca.mean_))
-
-    # helper: cosine distance to centroid = 1 - dot(z, c), both unit
+    # --------------------------------------------------------------------------
+    # 6) Global stability per class (across all profiles)
+    # --------------------------------------------------------------------------
     def _mean_dist_to_centroid(Z: np.ndarray) -> float:
-        if Z.shape[0] == 0: return float("nan")
+        if Z.shape[0] == 0:
+            return float("nan")
         c = _l2_normalize(Z.mean(axis=0, keepdims=True))[0]
         sims = Z @ c
         np.clip(sims, -1.0, 1.0, out=sims)
-        d = 1.0 - sims  # [0,2]
+        d = 1.0 - sims
         return float(np.mean(d))
 
-    # helper: mean variance across dims
     def _mean_feature_variance(Z: np.ndarray) -> float:
-        if Z.shape[0] <= 1: return float(0.0)
+        if Z.shape[0] <= 1:
+            return 0.0
         return float(np.var(Z, axis=0).mean())
 
-    # 4) Per-class global metrics
-    rows = []
-    for g in sorted(np.unique(cls_all)):
-        mask = (cls_all == g)
+    global_rows = []
+    for cls in classes:
+        mask = (cls_col == cls)
         Zg = Z_all[mask]
-        if Zg.shape[0] < min_per_class:
-            rows.append({
-                "class": g,
-                "n_runs": int(len(np.unique(run_all[mask]))),
-                "n_prototypes": int(Zg.shape[0]),
-                "mean_to_centroid": np.nan,
-                "variance": np.nan,
-                "silhouette_by_run": np.nan,
-            })
+        runs_g = run_col[mask]
+        grps_g = grp_col[mask]
+
+        n_proto = int(Zg.shape[0])
+        profiles = np.array([f"{r}|{g}" for r, g in zip(runs_g, grps_g)], dtype=object)
+        n_profiles = int(len(np.unique(profiles)))
+
+        if n_proto < min_per_class:
+            global_rows.append(
+                {
+                    "class": cls,
+                    "n_profiles": n_profiles,
+                    "n_prototypes": n_proto,
+                    "mean_to_centroid": np.nan,
+                    "variance": np.nan,
+                    "silhouette_by_profile": np.nan,
+                }
+            )
             continue
 
-        n_runs = len(np.unique(run_all[mask]))
         mean_to_cent = _mean_dist_to_centroid(Zg)
         var_mean = _mean_feature_variance(Zg)
 
-        # silhouette by run_id (higher → runs are separated → less globally stable)
-        if n_runs >= min_runs_for_sil and Zg.shape[0] >= 2:
-            # euclidean on unit vectors ~ cosine structure
+        # silhouette by profile: higher → profiles more separated → less stable
+        if n_profiles >= min_profiles_for_sil and Zg.shape[0] >= 2:
             try:
-                sil = silhouette_score(Zg, run_all[mask], metric="euclidean")
+                sil = silhouette_score(Zg, profiles, metric="euclidean")
             except Exception:
-                sil = np.nan
+                sil = math.nan
         else:
-            sil = np.nan
+            sil = math.nan
 
-        rows.append({
-            "class": g,
-            "n_runs": int(n_runs),
-            "n_prototypes": int(Zg.shape[0]),
-            "mean_to_centroid": float(mean_to_cent),
-            "variance": float(var_mean),
-            "silhouette_by_run": float(sil) if sil == sil else np.nan,  # handle nan
-        })
+        global_rows.append(
+            {
+                "class": cls,
+                "n_profiles": n_profiles,
+                "n_prototypes": n_proto,
+                "mean_to_centroid": float(mean_to_cent),
+                "variance": float(var_mean),
+                "silhouette_by_profile": float(sil)
+                if sil == sil
+                else math.nan,
+            }
+        )
 
-        # Optional scatter (first two PCA dims), colored by run
-        if save_plots and (ipca is not None) and Zg.shape[1] >= 2:
-            # use first two PCA comps BEFORE normalization to keep geometry; use Z_all 2D for consistent scale
-            # (simple: reuse Zg's first two columns)
+        # optional scatter: first two dims, coloured by profile
+        if save_plots and Zg.shape[1] >= 2:
             XY = Zg[:, :2]
             plt.figure(figsize=(5.5, 4.5))
-            runs_g = np.array(run_all[mask])
-            uruns = np.unique(runs_g)
-            for ru in uruns:
-                sel = (runs_g == ru)
-                plt.scatter(XY[sel, 0], XY[sel, 1], s=10, label=str(ru), alpha=0.8)
-            plt.title(f"Global prototypes — {g} (colored by run)")
-            plt.xlabel("PC1"); plt.ylabel("PC2"); plt.legend(markerscale=2, fontsize=7, frameon=False)
+            for prof in np.unique(profiles):
+                sel = profiles == prof
+                plt.scatter(XY[sel, 0], XY[sel, 1], s=10, label=str(prof), alpha=0.8)
+            plt.title(f"Global prototypes — {cls} (colored by profile)")
+            plt.xlabel("PC1")
+            plt.ylabel("PC2")
+            plt.legend(markerscale=2, fontsize=6, frameon=False)
             plt.tight_layout()
-            safe_g = _safe_slug(str(g))
-            plt.savefig(out_root / f"global_scatter_{safe_g}.png", dpi=160)
+            safe_cls = _safe_slug(str(cls))
+            plt.savefig(out_root / f"global_scatter_{safe_cls}.png", dpi=160)
             plt.close()
 
-    # 5) Save global summary
-    df = pd.DataFrame(rows)
-    df = df.sort_values(["silhouette_by_run", "mean_to_centroid"], na_position="last").reset_index(drop=True)
-    df.to_csv(out_root / "global_summary.csv", index=False)
+    global_df = pd.DataFrame(global_rows)
+    global_df = global_df.sort_values(
+        ["silhouette_by_profile", "mean_to_centroid"], na_position="last"
+    ).reset_index(drop=True)
+    global_df.to_csv(out_root / "global_summary.csv", index=False)
 
     return {"out_dir": str(out_root)}
+
