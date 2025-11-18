@@ -19,6 +19,7 @@ def _norm_rel_key(p: Path, root: Path) -> str:
         rel = p
     return str(rel).replace("\\", "/").lower()
 
+
 def _index_images_recursive(root: Path, exts=(".bmp", ".jpg", ".jpeg", ".png", ".tif", ".tiff")) -> dict:
     """
     Build a rich index:
@@ -47,6 +48,7 @@ def _index_images_recursive(root: Path, exts=(".bmp", ".jpg", ".jpeg", ".png", "
         index["by_stem"].setdefault(stem_key, []).append(p)
 
     return index
+
 
 def _resolve_image_path_from_name(name: str, input_root: Path, index: dict) -> Optional[Path]:
     """
@@ -92,6 +94,7 @@ def _resolve_image_path_from_name(name: str, input_root: Path, index: dict) -> O
     return candidates[0]
 
 # ---------- drawing ----------
+
 
 def _make_contact_sheet(
     images: List[Tuple[str, Optional[Path]]],
@@ -145,6 +148,7 @@ def _make_contact_sheet(
 
 # ---------- main ----------
 
+
 def make_novelty_montage_per_run(
     parent_dir: str,
     out_dir: str,
@@ -153,10 +157,19 @@ def make_novelty_montage_per_run(
     thumbs_per_row: int = 8,
 ):
     """
-    For each run:
-      - read <run>/novelty/novelty_inbox.csv
+    For each run, search under:
+
+        <out_dir>/novelty/<run_id>/**/novelty_inbox.csv
+
+    For every novelty_inbox.csv found (top-level or nested):
+
+      - read the CSV
       - resolve abs paths or via recursive index of input_path
-      - create PNG montage sorted by score (desc)
+      - create a PNG montage sorted by score (desc)
+
+    This supports both:
+      - classic layout: <run_id>/novelty_inbox.csv
+      - grouped layout: <run_id>/<group_id>/novelty_inbox.csv (e.g. per sample_id)
     """
     runs = build_run_index(parent_dir)
     if runs.empty:
@@ -165,62 +178,93 @@ def make_novelty_montage_per_run(
 
     for _, r in runs.iterrows():
         run_id = r["run_id"]
-        inbox_csv = Path(out_dir) / run_id / "novelty" / "novelty_inbox.csv"
-        if not inbox_csv.exists():
-            print(f"[WARN] run {run_id}: missing {inbox_csv}")
+        base_dir = Path(out_dir) / "novelty" / run_id
+        if not base_dir.exists():
+            print(f"[WARN] run {run_id}: missing base novelty dir {base_dir}")
             continue
 
-        try:
-            df = pd.read_csv(inbox_csv)
-        except Exception as e:
-            print(f"[WARN] run {run_id}: cannot read {inbox_csv}: {e}")
-            continue
-        if df.empty:
-            print(f"[WARN] run {run_id}: empty novelty_inbox.csv")
+        # Find all novelty_inbox.csv files under this run (including nested)
+        inbox_paths = sorted(base_dir.rglob("novelty_inbox.csv"))
+        if not inbox_paths:
+            print(f"[WARN] run {run_id}: no novelty_inbox.csv found under {base_dir}")
             continue
 
-        # ensure columns
-        cols_needed = ["image_name","abs_path","score","pred1_label","pred1_conf","pred2_label","pred2_conf"]
-        for c in cols_needed:
-            if c not in df.columns:
-                df[c] = ""
-        df = df.sort_values("score", ascending=False).head(top_n).reset_index(drop=True)
-
-        # prepare index of original images for fallback resolution
+        # Prepare index of original images for fallback resolution (per run)
         cfg = load_run_config(r["run_cfg"])
         input_path = cfg.get("input_path", "")
         input_root = Path(input_path) if input_path else None
-        idx = _index_images_recursive(input_root) if input_root else {"by_rel": {}, "by_name": {}, "by_stem": {}}
+        if input_root and input_root.exists():
+            idx = _index_images_recursive(input_root)
+        else:
+            idx = {"by_rel": {}, "by_name": {}, "by_stem": {}}
 
-        tiles: List[Tuple[str, Optional[Path]]] = []
-        for i, row in df.iterrows():
-            # Preferred: abs_path if valid
-            ap = str(row.get("abs_path", "") or "")
-            pth = Path(ap) if ap and Path(ap).exists() else None
-
-            # Fallbacks: resolve from image_name against input_path index
-            if pth is None and input_root:
-                name = str(row.get("image_name", "") or "")
-                pth = _resolve_image_path_from_name(name, input_root, idx)
-
-            # caption
+        for inbox_csv in inbox_paths:
+            # Determine group label ('' for top-level, or subdir name for nested)
             try:
-                c1 = float(row.get("pred1_conf", 0.0))
-                c2 = float(row.get("pred2_conf", 0.0))
-                lab = str(row.get("pred1_label", ""))
-                cap = f"#{i+1} s={float(row.get('score', 0)):.2f} {lab} ({c1:.2f}-{c2:.2f})"
-            except Exception:
-                cap = f"#{i+1} s={row.get('score', 0)} {row.get('pred1_label','')}"
-            tiles.append((cap, pth))
+                rel = inbox_csv.parent.relative_to(base_dir)
+                # rel == '.' at top-level; otherwise something like 'sample_001'
+                group_label = "" if str(rel) == "." else str(rel)
+            except ValueError:
+                # inbox not actually under base_dir (shouldn't happen, but be robust)
+                group_label = ""
 
-        safe_run = _safe_slug(run_id)
-        out_path = Path(out_dir) / run_id / "novelty" / f"novelty_montage_{safe_run}.png"
-        title = f"{run_id} — Top-{len(tiles)} novelty"
-        _make_contact_sheet(
-            images=tiles,
-            out_path=out_path,
-            title=title,
-            thumb_size=thumb_size,
-            thumbs_per_row=thumbs_per_row,
-        )
-        print(f"[INFO] wrote novelty montage: {out_path}")
+            try:
+                df = pd.read_csv(inbox_csv)
+            except Exception as e:
+                print(f"[WARN] run {run_id}, inbox {inbox_csv}: cannot read CSV: {e}")
+                continue
+            if df.empty:
+                print(f"[WARN] run {run_id}, inbox {inbox_csv}: empty CSV")
+                continue
+
+            # ensure required columns exist
+            cols_needed = [
+                "image_name", "abs_path", "score",
+                "pred1_label", "pred1_conf",
+                "pred2_label", "pred2_conf",
+            ]
+            for c in cols_needed:
+                if c not in df.columns:
+                    df[c] = ""
+
+            df = df.sort_values("score", ascending=False).head(top_n).reset_index(drop=True)
+
+            tiles: List[Tuple[str, Optional[Path]]] = []
+            for i, row in df.iterrows():
+                # Preferred: abs_path if valid
+                ap = str(row.get("abs_path", "") or "")
+                pth = Path(ap) if ap and Path(ap).exists() else None
+
+                # Fallbacks: resolve from image_name against input_path index
+                if pth is None and input_root:
+                    name = str(row.get("image_name", "") or "")
+                    pth = _resolve_image_path_from_name(name, input_root, idx)
+
+                # caption
+                try:
+                    c1 = float(row.get("pred1_conf", 0.0))
+                    c2 = float(row.get("pred2_conf", 0.0))
+                    lab = str(row.get("pred1_label", ""))
+                    cap = f"#{i+1} s={float(row.get('score', 0)):.2f} {lab} ({c1:.2f}-{c2:.2f})"
+                except Exception:
+                    cap = f"#{i+1} s={row.get('score', 0)} {row.get('pred1_label', '')}"
+                tiles.append((cap, pth))
+
+            safe_run = _safe_slug(run_id)
+            if group_label:
+                safe_group = _safe_slug(group_label)
+                out_path = base_dir / group_label / f"novelty_montage_{safe_run}_{safe_group}.png"
+                title = f"{run_id}/{group_label} — Top-{len(tiles)} novelty"
+            else:
+                out_path = base_dir / f"novelty_montage_{safe_run}.png"
+                title = f"{run_id} — Top-{len(tiles)} novelty"
+
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            _make_contact_sheet(
+                images=tiles,
+                out_path=out_path,
+                title=title,
+                thumb_size=thumb_size,
+                thumbs_per_row=thumbs_per_row,
+            )
+            print(f"[INFO] wrote novelty montage: {out_path}")
