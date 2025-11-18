@@ -7,11 +7,12 @@ import numpy as np
 import pandas as pd
 from sklearn.decomposition import IncrementalPCA
 
-from src.index import build_run_index
+from src.index import build_group_index
 from src.stream import (
     open_h5, get_h5_shapes,
     iter_feature_chunks, load_predictions_map,
 )
+from src.utils.paths import _safe_slug
 
 # ------------------------------------------------------------
 # Distance utilities
@@ -284,176 +285,330 @@ def _coverage_metrics(assignments: np.ndarray, k: int, distances: Optional[np.nd
         metrics["median_within"] = float(np.median(distances))
     return metrics
 
+
+def _collect_by_class_for_group(
+    h5_path: str,
+    preds_csv: str,
+    indices: Optional[np.ndarray],
+    max_per_class: int = 4000,
+    batch_size: int = 4096,
+) -> Dict[str, Dict[str, np.ndarray]]:
+    """
+    Stream features from H5 and collect up to max_per_class samples per predicted class.
+
+    If `indices` is None:
+        use all rows in the H5 file (whole run).
+    If `indices` is an array of global row indices:
+        only keep those rows (e.g. for a given sample_id group).
+
+    Returns:
+      buckets: dict[label] -> {
+          "X":   (N_c, D) features,
+          "names": (N_c,) image names,
+          "idx": (N_c,) global row indices
+      }
+    """
+    # load preds once
+    preds = load_predictions_map(
+        preds_csv,
+        cols=["Image Name", "Top-1 Predicted Label"],
+    )
+
+    allowed: Optional[set] = None
+    if indices is not None:
+        allowed = set(int(i) for i in np.asarray(indices, dtype=np.int64))
+
+    buckets: Dict[str, Dict[str, List]] = {}
+
+    with open_h5(h5_path) as h5f:
+        global_offset = 0
+        for blk in iter_feature_chunks(h5f, batch_size=batch_size):
+            X = blk["features"]
+            names = blk["image_names"]
+            n = X.shape[0]
+
+            sub = preds.reindex(names)
+            labels = sub["pred1_label"].fillna("unknown").astype(str).values
+
+            for j in range(n):
+                gidx = global_offset + j
+                if allowed is not None and gidx not in allowed:
+                    continue
+
+                cls = labels[j]
+                if cls not in buckets:
+                    buckets[cls] = {"X": [], "names": [], "idx": []}
+
+                # class-level cap
+                if len(buckets[cls]["X"]) >= max_per_class:
+                    continue
+
+                buckets[cls]["X"].append(X[j])
+                buckets[cls]["names"].append(str(names[j]))
+                buckets[cls]["idx"].append(gidx)
+
+            global_offset += n
+
+    # convert lists -> arrays
+    out: Dict[str, Dict[str, np.ndarray]] = {}
+    for cls, d in buckets.items():
+        if not d["X"]:
+            continue
+        Xc = np.stack(d["X"], axis=0)
+        names = np.asarray(d["names"])
+        idxs = np.asarray(d["idx"], dtype=np.int64)
+        out[cls] = {"X": Xc, "names": names, "idx": idxs}
+
+    return out
+
+
+def _fit_project_pca_for_buckets(
+    buckets: Dict[str, Dict[str, np.ndarray]],
+    pca_dim: int,
+) -> Tuple[Dict[str, Dict[str, np.ndarray]], Optional[IncrementalPCA]]:
+    """
+    Fit a PCA on the concatenated sample from all class-buckets
+    and project each bucket into that PCA space.
+
+    Returns updated buckets where each has 'Xp' (projected features)
+    and the PCA object (or None if no reduction was applied).
+    """
+    if not buckets:
+        return buckets, None
+
+    Xs = [d["X"] for d in buckets.values()]
+    X_all = np.vstack(Xs)
+
+    if X_all.shape[1] > pca_dim:
+        ipca = IncrementalPCA(n_components=pca_dim, batch_size=4096)
+        # single pass is fine; data is already a sample
+        if X_all.shape[0] > 4096:
+            for j in range(0, X_all.shape[0], 4096):
+                ipca.partial_fit(X_all[j : j + 4096])
+        else:
+            ipca.partial_fit(X_all)
+
+        for cls, d in buckets.items():
+            buckets[cls]["Xp"] = ipca.transform(d["X"])
+    else:
+        ipca = None
+        mean = X_all.mean(axis=0, keepdims=True)
+        for cls, d in buckets.items():
+            buckets[cls]["Xp"] = d["X"] - mean
+
+    return buckets, ipca
+
+
 # ------------------------------------------------------------
 # Public API
 # ------------------------------------------------------------
 
-
 def run_prototypes(
     parent_dir: str,
     out_dir: str,
-    mode: str = "per_class",              # 'per_class' or 'per_run'
-    k: int = 10,                          # medoids per group
-    pca_dim: int = 50,                    # reduce before clustering
-    max_per_class: int = 4000,            # cap memory per class (stream sampled)
-    batch_size: int = 4096,               # H5 chunk size for streaming
-    metric: str = "cosine",               # 'cosine' or 'euclidean'
-    min_points_for_group: int = 50,       # skip tiny groups
+    group_mode: str = "run",          # 'run' or 'meta'
+    group_col: str = "sample_id",     # used when group_mode == 'meta'
+    k: int = 10,                      # medoids per group
+    pca_dim: int = 50,                # reduce before clustering
+    max_per_class: int = 4000,        # cap memory per class
+    batch_size: int = 4096,           # H5 chunk size for streaming
+    metric: str = "cosine",           # 'cosine' or 'euclidean'
+    min_points_for_group: int = 50,   # skip tiny groups
     max_iter: int = 20,
     seed: int = 42,
 ) -> Dict[str, str]:
     """
     Discover medoid prototypes and coverage metrics.
-    - mode='per_class': find k medoids per predicted top-1 label
-    - mode='per_run'  : treat whole run as one group and find k medoids
 
-    Writes (per run):
-      - prototypes/prototypes.json : list of {group, medoid_name, medoid_global_idx, medoid_local_row}
-      - prototypes/coverage.csv    : one row per group with entropy/gini/mean distances and per-medoid sizes
+    group_mode = 'run':
+        - One logical group per run (all samples in that run).
+    group_mode = 'meta':
+        - One logical group per (run_id, group_id), where group_id is from metadata
+          column `group_col` (e.g. sample_id).
+
+    For each logical group, we compute TWO kinds of prototypes:
+
+      1) Overall prototypes for the group (all classes mixed).
+      2) Per-class prototypes inside that group.
+
+    Outputs (for each run or (run, group_id)):
+
+      <out_dir>/prototypes/<run_id>/[<group_id>/]prototypes_overall.json
+      <out_dir>/prototypes/<run_id>/[<group_id>/]coverage_overall.csv
+
+      <out_dir>/prototypes/<run_id>/[<group_id>/]prototypes_per_class.json
+      <out_dir>/prototypes/<run_id>/[<group_id>/]coverage_per_class.csv
     """
-    assert mode in {"per_class", "per_run"}
-    out_root = Path(out_dir)
+    assert group_mode in {"run", "meta"}
+    rng = np.random.default_rng(seed)
+
+    out_root = Path(out_dir) / "prototypes"
     out_root.mkdir(parents=True, exist_ok=True)
 
-    runs = build_run_index(parent_dir)
-    if runs.empty:
-        raise RuntimeError(f"No runs found under: {parent_dir}")
+    # Build group index
+    groups = build_group_index(
+        parent_dir=parent_dir,
+        mode="run" if group_mode == "run" else "meta",
+        group_col=group_col,
+    )
+    if groups.empty:
+        raise RuntimeError(f"No groups found under: {parent_dir} (group_mode={group_mode})")
 
-    for _, r in runs.iterrows():
-        run_id = r["run_id"]
-        run_out = out_root / run_id / "prototypes"
-        run_out.mkdir(parents=True, exist_ok=True)
+    for _, g in groups.iterrows():
+        run_id = g["run_id"]
+        group_id = g["group_id"] if group_mode == "meta" else run_id
 
-        if mode == "per_class":
-            # 1) sample per predicted class via streaming
-            buckets = _collect_by_class_streamed(
-                h5_path=r["features"],
-                preds_csv=r["preds"],
-                max_per_class=max_per_class,
-                batch_size=batch_size,
-            )
-            # 2) PCA per run on concatenated sample
-            buckets = _fit_project_pca_per_run(buckets, pca_dim=pca_dim)
-            groups = sorted(buckets.keys())
+        features_path = g["features"]
+        preds_path = g["preds"]
 
-            proto_records: List[Dict[str, object]] = []
-            cov_records: List[Dict[str, object]] = []
-
-            for g in groups:
-                X = buckets[g]["Xp"] if "Xp" in buckets[g] else buckets[g]["X"]
-                names = buckets[g]["names"]
-                idxs = buckets[g]["idx"]
-                X = np.asarray(X)
-                if X.shape[0] < max(min_points_for_group, k):
-                    continue  # skip tiny group
-
-                # 3) k-medoids on group
-                med_idx_local, assign = k_medoids(X, k=k, metric=metric, max_iter=max_iter, seed=seed)
-                # global indices & names
-                med_global_idx = np.asarray(idxs)[med_idx_local].tolist()
-                med_names = np.asarray(names)[med_idx_local].tolist()
-
-                # within distances (for coverage metric)
-                # reuse distance to assigned medoid
-                M = X[med_idx_local]
-                D = _pairwise_dist(X, M, metric)
-                within = D[np.arange(X.shape[0]), assign]
-
-                # 4) coverage metrics
-                cov = _coverage_metrics(assign, k=k, distances=within)
-                # per-medoid sizes
-                counts = np.bincount(assign, minlength=med_idx_local.size).astype(int)
-                for i, c in enumerate(counts):
-                    cov[f"medoid_{i}_count"] = int(c)
-
-                cov.update({
-                    "run_id": run_id,
-                    "group": g,
-                    "n_group": int(X.shape[0]),
-                    "k": int(med_idx_local.size),
-                    "metric": metric,
-                    "pca_dim": int(pca_dim),
-                })
-                cov_records.append(cov)
-
-                # 5) write prototype identities
-                for i, (gi, nm) in enumerate(zip(med_global_idx, med_names)):
-                    proto_records.append({
-                        "run_id": run_id,
-                        "group": g,
-                        "medoid_rank": int(i),
-                        "medoid_global_idx": int(gi),
-                        "medoid_name": str(nm),
-                    })
-
-            # save
-            with open(run_out / "prototypes.json", "w", encoding="utf-8") as f:
-                json.dump(proto_records, f, indent=2)
-            pd.DataFrame(cov_records).to_csv(run_out / "coverage.csv", index=False)
-
-        else:  # mode == 'per_run'
-            # collect one large sample (balanced across classes implicitly via streaming cap)
-            buckets = _collect_by_class_streamed(
-                h5_path=r["features"],
-                preds_csv=r["preds"],
-                max_per_class=max_per_class,
-                batch_size=batch_size,
-            )
-            # merge all classes
-            if not buckets:
+        # indices: None => whole run, else a subset of row indices (for meta group)
+        indices = None
+        if group_mode == "meta":
+            idx_arr = g.get("indices", None)
+            if idx_arr is None or len(idx_arr) == 0:
                 continue
-            Xs, names, idxs = [], [], []
-            for d in buckets.values():
-                Xs.append(d["X"])
-                names.extend(d["names"].tolist())
-                idxs.extend(d["idx"].tolist())
-            Xall = np.vstack(Xs)
-            names = np.asarray(names)
-            idxs = np.asarray(idxs, dtype=np.int64)
+            indices = np.asarray(idx_arr, dtype=np.int64)
 
-            # PCA on run sample
-            if Xall.shape[1] > pca_dim:
-                ipca = IncrementalPCA(n_components=pca_dim, batch_size=4096)
-                if Xall.shape[0] > 4096:
-                    for j in range(0, Xall.shape[0], 4096):
-                        ipca.partial_fit(Xall[j : j + 4096])
-                else:
-                    ipca.partial_fit(Xall)
-                Xp = ipca.transform(Xall)
-            else:
-                Xp = Xall - Xall.mean(axis=0, keepdims=True)
+        # output directory for this logical group
+        if group_mode == "meta":
+            safe_group = _safe_slug(str(group_id))
+            group_out = out_root / run_id / safe_group
+        else:
+            group_out = out_root / run_id
 
-            if Xp.shape[0] < max(min_points_for_group, k):
-                continue
+        group_out.mkdir(parents=True, exist_ok=True)
 
-            med_idx_local, assign = k_medoids(Xp, k=k, metric=metric, max_iter=max_iter, seed=seed)
+        # --- 1) Collect per-class buckets for this group ---
+        buckets = _collect_by_class_for_group(
+            h5_path=features_path,
+            preds_csv=preds_path,
+            indices=indices,
+            max_per_class=max_per_class,
+            batch_size=batch_size,
+        )
+        if not buckets:
+            continue
+
+        # --- 2) Fit PCA on all buckets and project them ---
+        buckets, ipca = _fit_project_pca_for_buckets(buckets, pca_dim=pca_dim)
+
+        # =====================================================================
+        # A) PER-CLASS PROTOTYPES (like old mode='per_class', but per group)
+        # =====================================================================
+        proto_records_cls: List[Dict[str, object]] = []
+        cov_records_cls: List[Dict[str, object]] = []
+
+        for cls_label in sorted(buckets.keys()):
+            X = np.asarray(buckets[cls_label]["Xp"])
+            names = np.asarray(buckets[cls_label]["names"])
+            idxs = np.asarray(buckets[cls_label]["idx"], dtype=np.int64)
+
+            if X.shape[0] < max(min_points_for_group, k):
+                continue  # skip tiny group
+
+            med_idx_local, assign = k_medoids(
+                X, k=k, metric=metric, max_iter=max_iter, seed=seed
+            )
+
             med_global_idx = idxs[med_idx_local].tolist()
             med_names = names[med_idx_local].tolist()
 
-            M = Xp[med_idx_local]
-            D = _pairwise_dist(Xp, M, metric)
-            within = D[np.arange(Xp.shape[0]), assign]
+            # within distances for coverage
+            M = X[med_idx_local]
+            D = _pairwise_dist(X, M, metric)
+            within = D[np.arange(X.shape[0]), assign]
+
             cov = _coverage_metrics(assign, k=len(med_idx_local), distances=within)
+            counts = np.bincount(assign, minlength=len(med_idx_local)).astype(int)
+            for i, c in enumerate(counts):
+                cov[f"medoid_{i}_count"] = int(c)
+
             cov.update({
                 "run_id": run_id,
-                "group": "__ALL__",
-                "n_group": int(Xp.shape[0]),
+                "group_id": group_id,
+                "proto_group": str(cls_label),  # class group
+                "n_group": int(X.shape[0]),
                 "k": int(len(med_idx_local)),
                 "metric": metric,
                 "pca_dim": int(pca_dim),
             })
+            cov_records_cls.append(cov)
 
-            # outputs
-            proto_records = [{
+            for i, (gi, nm) in enumerate(zip(med_global_idx, med_names)):
+                proto_records_cls.append({
+                    "run_id": run_id,
+                    "group_id": group_id,
+                    "proto_group": str(cls_label),
+                    "medoid_rank": int(i),
+                    "medoid_global_idx": int(gi),
+                    "medoid_name": str(nm),
+                })
+
+        # =====================================================================
+        # B) OVERALL PROTOTYPES PER GROUP (like old mode='per_run', but per group)
+        # =====================================================================
+        # Merge all classes into one big group for this (run, group_id)
+        Xs_all, names_all, idxs_all = [], [], []
+        for d in buckets.values():
+            Xs_all.append(d["Xp"])
+            names_all.extend(d["names"].tolist())
+            idxs_all.extend(d["idx"].tolist())
+
+        X_all = np.vstack(Xs_all)
+        names_all = np.asarray(names_all)
+        idxs_all = np.asarray(idxs_all, dtype=np.int64)
+
+        proto_records_all: List[Dict[str, object]] = []
+        cov_records_all: List[Dict[str, object]] = []
+
+        if X_all.shape[0] >= max(min_points_for_group, k):
+            med_idx_local, assign = k_medoids(
+                X_all, k=k, metric=metric, max_iter=max_iter, seed=seed
+            )
+
+            med_global_idx = idxs_all[med_idx_local].tolist()
+            med_names = names_all[med_idx_local].tolist()
+
+            M = X_all[med_idx_local]
+            D = _pairwise_dist(X_all, M, metric)
+            within = D[np.arange(X_all.shape[0]), assign]
+            cov = _coverage_metrics(assign, k=len(med_idx_local), distances=within)
+            cov.update({
                 "run_id": run_id,
-                "group": "__ALL__",
-                "medoid_rank": int(i),
-                "medoid_global_idx": int(gi),
-                "medoid_name": str(nm),
-            } for i, (gi, nm) in enumerate(zip(med_global_idx, med_names))]
+                "group_id": group_id,
+                "proto_group": "__ALL__",  # overall
+                "n_group": int(X_all.shape[0]),
+                "k": int(len(med_idx_local)),
+                "metric": metric,
+                "pca_dim": int(pca_dim),
+            })
+            cov_records_all.append(cov)
 
-            with open(run_out / "prototypes.json", "w", encoding="utf-8") as f:
-                json.dump(proto_records, f, indent=2)
-            pd.DataFrame([cov]).to_csv(run_out / "coverage.csv", index=False)
+            for i, (gi, nm) in enumerate(zip(med_global_idx, med_names)):
+                proto_records_all.append({
+                    "run_id": run_id,
+                    "group_id": group_id,
+                    "proto_group": "__ALL__",
+                    "medoid_rank": int(i),
+                    "medoid_global_idx": int(gi),
+                    "medoid_name": str(nm),
+                })
+
+        # =====================================================================
+        # C) Save outputs for this (run, group_id)
+        # =====================================================================
+        # per-class outputs
+        if proto_records_cls:
+            with open(group_out / "prototypes_per_class.json", "w", encoding="utf-8") as f:
+                json.dump(proto_records_cls, f, indent=2)
+        if cov_records_cls:
+            pd.DataFrame(cov_records_cls).to_csv(group_out / "coverage_per_class.csv", index=False)
+
+        # overall outputs
+        if proto_records_all:
+            with open(group_out / "prototypes_overall.json", "w", encoding="utf-8") as f:
+                json.dump(proto_records_all, f, indent=2)
+        if cov_records_all:
+            pd.DataFrame(cov_records_all).to_csv(group_out / "coverage_overall.csv", index=False)
 
     return {"out_dir": str(out_root)}

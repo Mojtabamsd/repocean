@@ -6,7 +6,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--parent", required=True, help="Folder containing run subfolders")
     ap.add_argument("--out_dir", required=True, help="Where to write prototypes/coverage")
-    ap.add_argument("--mode", choices=["per_class", "per_run"], default="per_class")
+    ap.add_argument("--group_mode", choices=["run", "meta"], default="run")
+    ap.add_argument("--group_col", default="sample_id")
     ap.add_argument("--k", type=int, default=10, help="Number of medoids per group")
     ap.add_argument("--pca_dim", type=int, default=50)
     ap.add_argument("--max_per_class", type=int, default=4000)
@@ -20,7 +21,8 @@ def main():
     paths = run_prototypes(
         parent_dir=args.parent,
         out_dir=args.out_dir,
-        mode=args.mode,
+        group_mode=args.group_mode,
+        group_col=args.group_col,
         k=args.k,
         pca_dim=args.pca_dim,
         max_per_class=args.max_per_class,
