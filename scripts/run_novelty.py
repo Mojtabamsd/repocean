@@ -6,6 +6,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--parent", required=True, help="Folder containing run subfolders")
     ap.add_argument("--out_dir", required=True, help="Where to write novelty/<CSV>")
+    ap.add_argument("--group_mode", choices=["run", "meta"], default="run")
+    ap.add_argument("--group_col", default="sample_id")
     ap.add_argument("--top_n", type=int, default=200)
     ap.add_argument("--pca_dim", type=int, default=50)
     ap.add_argument("--reservoir_cap", type=int, default=20000)
@@ -20,6 +22,8 @@ def main():
     res = run_novelty_inbox(
         parent_dir=args.parent,
         out_dir=args.out_dir,
+        group_mode=args.group_mode,
+        group_col=args.group_col,
         top_n=args.top_n,
         pca_dim=args.pca_dim,
         reservoir_cap=args.reservoir_cap,

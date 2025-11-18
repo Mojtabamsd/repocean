@@ -9,11 +9,16 @@ from sklearn.decomposition import IncrementalPCA
 from sklearn.neighbors import NearestNeighbors
 
 from src.index import build_run_index
-from src.stream import (
-    open_h5, get_h5_shapes, iter_feature_chunks, read_rows_by_indices,
-    load_predictions_map
-)
 from src.utils.io import load_run_config
+from src.metadata import load_run_metadata
+from src.stream import (
+    open_h5,
+    get_h5_shapes,
+    iter_feature_chunks,
+    load_predictions_map,
+    read_rows_by_indices,
+)
+from src.utils.paths import _safe_slug
 
 # ----------------------------
 # Small helpers
@@ -160,6 +165,8 @@ def _build_density_index(reservoir: np.ndarray, knn_k: int) -> Optional[NearestN
 def run_novelty_inbox(
     parent_dir: str,
     out_dir: str,
+    group_mode: str = "run",  # "run" | "meta"
+    group_col: str = "sample_id",  # used when group_mode == "meta"
     top_n: int = 200,
     pca_dim: int = 50,
     reservoir_cap: int = 20000,
@@ -171,30 +178,70 @@ def run_novelty_inbox(
     seed: int = 42,
 ) -> Dict[str, str]:
     """
-    For each run, write <run>/novelty/novelty_inbox.csv with columns:
-      run_id, image_name, abs_path, pred1_label, pred1_conf, pred2_label, pred2_conf,
-      centroid_dist, knn_mean, margin_penalty, score
+    Novelty scoring for each run, optionally split by metadata groups.
 
-    Score = w1*centroid_dist + w2*knn_mean + w3*(1 - (conf1 - conf2)_clip).
-    All distances are cosine-like (0..2) by using L2-normalized PCA vectors.
+    Original behaviour (group_mode="run"):
+      For each run, write:
+        <out_dir>/novelty/<run_id>/novelty_inbox.csv
+
+      Columns:
+        run_id, image_name, abs_path, pred1_label, pred1_conf, pred2_label, pred2_conf,
+        centroid_dist, knn_mean, margin_penalty, score
+
+      Score = w_centroid * centroid_dist
+              + w_density * knn_mean
+              + w_margin * (1 - (conf1 - conf2)_clip).
+
+    Metadata behaviour (group_mode="meta"):
+      - Still fit PCA + reservoir per run (same model).
+      - But keep a separate top-N heap per group_id (e.g. per sample_id).
+      - Write:
+          <out_dir>/novelty/<run_id>/<group_id>/novelty_inbox.csv
     """
     rng = np.random.default_rng(seed)
     runs = build_run_index(parent_dir)
     if runs.empty:
         raise RuntimeError(f"No runs found under: {parent_dir}")
 
-    out_root = Path(out_dir)
+    out_root = Path(out_dir) / "novelty"
     out_root.mkdir(parents=True, exist_ok=True)
 
     for _, r in runs.iterrows():
         run_id = r["run_id"]
-        run_out = out_root / run_id / "novelty"
+        run_out = out_root / run_id
         run_out.mkdir(parents=True, exist_ok=True)
 
-        # 1) Fit PCA basis per run
-        ipca = _fit_ipca_basis_for_run(r["features"], pca_dim=pca_dim, bootstrap=4000)
+        # 0) Load run config + metadata (for grouping)
+        cfg = load_run_config(r["run_cfg"])
+        input_path = cfg.get("input_path")
+        if group_mode == "meta" and input_path:
+            meta = load_run_metadata(input_path, cols=[group_col])
+            if not meta.empty and group_col in meta.columns:
+                # normalise index to bare filenames to match H5 image_names
+                meta = meta.copy()
+                meta.index = (
+                    meta.index.astype(str)
+                    .str.replace("\\", "/", regex=False)
+                    .str.split("/")
+                    .str[-1]
+                )
+            else:
+                # no usable metadata; gracefully fall back to run-level grouping
+                meta = pd.DataFrame()
+                group_mode_effective = "run"
+            group_mode_effective = "meta" if not meta.empty and group_col in meta.columns else "run"
+        else:
+            meta = pd.DataFrame()
+            group_mode_effective = "run"
 
-        # 2) Build centroids + reservoir
+        # 1) Fit PCA basis per run
+        ipca = _fit_ipca_basis_for_run(
+            r["features"],
+            pca_dim=pca_dim,
+            bootstrap=4000,
+        )
+
+        # 2) Build centroids + reservoir (per run)
         centroids, reservoir = _build_centroids_and_reservoir(
             h5_path=r["features"],
             preds_csv=r["preds"],
@@ -205,8 +252,7 @@ def run_novelty_inbox(
         nn = _build_density_index(reservoir, knn_k=knn_k)
 
         # Absolute path mapping (for CSV convenience)
-        cfg = load_run_config(r["run_cfg"])
-        file_map = _index_images_recursive(Path(cfg["input_path"])) if cfg.get("input_path") else {}
+        file_map = _index_images_recursive(Path(input_path)) if input_path else {}
 
         # Load predictions (now with top2 for margin)
         preds = load_predictions_map(
@@ -218,8 +264,16 @@ def run_novelty_inbox(
             ],
         )
 
-        # 3) Pass B: stream again, compute scores, keep top-N via heap
-        heap: List[Tuple[float, Dict[str, object]]] = []  # (score, row)
+        # 3) Pass B: stream again, compute scores, keep top-N
+        if group_mode_effective == "run":
+            # single heap per run (original behaviour)
+            heap: List[Tuple[float, Dict[str, object]]] = []
+            heap_dict = None
+        else:
+            # separate heap per group_id
+            heap = None
+            heap_dict: Dict[str, List[Tuple[float, Dict[str, object]]]] = {}
+
         with open_h5(r["features"]) as h5f:
             for blk in iter_feature_chunks(h5f, batch_size=batch_size):
                 X = blk["features"]
@@ -239,18 +293,23 @@ def run_novelty_inbox(
                 pred2_conf  = sub["pred2_conf"].astype(float).fillna(0.0).values
 
                 # distances to class centroid (cosine)
-                # if label centroid missing (rare), fall back to global centroid (~mean of reservoir)
-                default_centroid = reservoir.mean(axis=0, keepdims=True) if reservoir.shape[0] > 0 else np.zeros((1, Xp.shape[1]), dtype=np.float32)
+                default_centroid = (
+                    reservoir.mean(axis=0, keepdims=True)
+                    if reservoir.shape[0] > 0
+                    else np.zeros((1, Xp.shape[1]), dtype=np.float32)
+                )
                 if default_centroid.shape[0] == 1:
                     default_centroid = _l2_normalize(default_centroid)
-                # build centroid matrix per row
                 C = np.vstack([centroids.get(l, default_centroid[0]) for l in pred1_label])
-                d_centroid = _cosine_distance(Xp, C).diagonal()  # dist to its own centroid
+                d_centroid = _cosine_distance(Xp, C).diagonal()
 
                 # local density approximation via reservoir kNN
                 if nn is not None and reservoir.shape[0] > 0:
-                    # Euclidean on unit vectors ~ cosine; exclude self won't matter as reservoir is separate
-                    D_knn, _ = nn.kneighbors(Xp, n_neighbors=min(knn_k, reservoir.shape[0]), return_distance=True)
+                    D_knn, _ = nn.kneighbors(
+                        Xp,
+                        n_neighbors=min(knn_k, reservoir.shape[0]),
+                        return_distance=True,
+                    )
                     knn_mean = D_knn.mean(axis=1)
                 else:
                     knn_mean = np.zeros(Xp.shape[0], dtype=np.float32)
@@ -260,15 +319,32 @@ def run_novelty_inbox(
                 margin_pen = 1.0 - margin  # in [0,1]
 
                 # combined score
-                score = w_centroid * d_centroid + w_density * knn_mean + w_margin * margin_pen
+                score = (
+                    w_centroid * d_centroid
+                    + w_density * knn_mean
+                    + w_margin * margin_pen
+                )
 
-                # push rows into fixed-size min-heap (top-N by score)
+                # push rows into fixed-size heap(s)
                 for i in range(Xp.shape[0]):
                     name = str(names[i])
+                    name_key = name.replace("\\", "/").split("/")[-1]
+
+                    # assign group
+                    if group_mode_effective == "meta":
+                        if name_key in meta.index:
+                            group_id = str(meta.loc[name_key, group_col])
+                        else:
+                            # if no metadata match, you can skip or assign to a special group
+                            group_id = "unknown"
+                    else:
+                        group_id = run_id  # single group per run
+
                     rec = {
                         "run_id": run_id,
+                        "group_id": group_id if group_mode_effective == "meta" else run_id,
                         "image_name": name,
-                        "abs_path": str(file_map.get(name.lower(), "")),
+                        "abs_path": str(file_map.get(name_key.lower(), "")),
                         "pred1_label": pred1_label[i],
                         "pred1_conf": float(pred1_conf[i]),
                         "pred2_label": pred2_label[i],
@@ -278,16 +354,38 @@ def run_novelty_inbox(
                         "margin_penalty": float(margin_pen[i]),
                         "score": float(score[i]),
                     }
-                    if len(heap) < top_n:
-                        heapq.heappush(heap, (rec["score"], rec))
-                    else:
-                        if score[i] > heap[0][0]:
-                            heapq.heapreplace(heap, (rec["score"], rec))
 
-        # 4) Save CSV, highest score first
-        heap.sort(key=lambda x: x[0], reverse=True)
-        rows = [rec for _, rec in heap]
-        out_csv = run_out / "novelty_inbox.csv"
-        pd.DataFrame(rows).to_csv(out_csv, index=False)
+                    if group_mode_effective == "run":
+                        # one heap for the whole run
+                        if len(heap) < top_n:
+                            heapq.heappush(heap, (rec["score"], rec))
+                        else:
+                            if score[i] > heap[0][0]:
+                                heapq.heapreplace(heap, (rec["score"], rec))
+                    else:
+                        # one heap per group_id
+                        h = heap_dict.setdefault(group_id, [])
+                        if len(h) < top_n:
+                            heapq.heappush(h, (rec["score"], rec))
+                        else:
+                            if score[i] > h[0][0]:
+                                heapq.heapreplace(h, (rec["score"], rec))
+
+        # 4) Save CSV(s), highest score first
+        if group_mode_effective == "run":
+            heap.sort(key=lambda x: x[0], reverse=True)
+            rows = [rec for _, rec in heap]
+            out_csv = run_out / "novelty_inbox.csv"
+            pd.DataFrame(rows).to_csv(out_csv, index=False)
+        else:
+            # one CSV per group inside this run
+            for g_id, h in heap_dict.items():
+                h.sort(key=lambda x: x[0], reverse=True)
+                rows = [rec for _, rec in h]
+                safe_group = _safe_slug(str(g_id))
+                group_out = run_out / safe_group
+                group_out.mkdir(parents=True, exist_ok=True)
+                out_csv = group_out / "novelty_inbox.csv"
+                pd.DataFrame(rows).to_csv(out_csv, index=False)
 
     return {"out_dir": str(out_root)}
