@@ -250,21 +250,14 @@ def make_novelty_montage_per_run(
                     cap = f"#{i+1} s={row.get('score', 0)} {row.get('pred1_label', '')}"
                 tiles.append((cap, pth))
 
-            safe_run = _safe_slug(run_id)
-            if group_label:
-                safe_group = _safe_slug(group_label)
-                out_path = base_dir / group_label / f"novelty_montage_{safe_run}_{safe_group}.png"
-                title = f"{run_id}/{group_label} — Top-{len(tiles)} novelty"
-            else:
-                out_path = base_dir / f"novelty_montage_{safe_run}.png"
-                title = f"{run_id} — Top-{len(tiles)} novelty"
-
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            _make_contact_sheet(
-                images=tiles,
-                out_path=out_path,
-                title=title,
-                thumb_size=thumb_size,
-                thumbs_per_row=thumbs_per_row,
-            )
-            print(f"[INFO] wrote novelty montage: {out_path}")
+        safe_run = _safe_slug(run_id)
+        out_path = Path(out_dir) / run_id / "novelty" / f"novelty_montage_{safe_run}.png"
+        title = f"{run_id} — Top-{len(tiles)} novelty"
+        _make_contact_sheet(
+            images=tiles,
+            out_path=out_path,
+            title=title,
+            thumb_size=thumb_size,
+            thumbs_per_row=thumbs_per_row,
+        )
+        print(f"[INFO] wrote novelty montage: {out_path}")
