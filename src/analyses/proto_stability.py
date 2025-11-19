@@ -239,7 +239,7 @@ def run_prototype_stability(
     if runs.empty:
         raise RuntimeError(f"No runs found under: {parent_dir}")
 
-    out_root = Path(out_dir) / "_global" / "proto_stability"
+    out_root = Path(out_dir) / "prototypes" / "_global" / "proto_stability"
     out_root.mkdir(parents=True, exist_ok=True)
 
     # 1) Collect medoids table across all runs & groups
