@@ -463,7 +463,8 @@ def run_prototype_stability(
                 j = idx_map[pj_full]
                 M[i, j] = M[j, i] = row["mean_hausdorff"]
 
-            plt.figure(figsize=(max(4, n * 0.5), max(3, n * 0.5)))
+            # plt.figure(figsize=(max(4, n * 0.5), max(3, n * 0.5)))
+            plt.figure(figsize=(8, 6))
             plt.imshow(M, interpolation="nearest")
             plt.title(f"Proto mean-Hausdorff across profiles — {cls_short}")
             plt.xticks(range(n), profile_labels, rotation=90, fontsize=7)
@@ -550,7 +551,8 @@ def run_prototype_stability(
         # optional scatter: first two dims, coloured by profile (short labels only for legend)
         if save_plots and Zg.shape[1] >= 2:
             XY = Zg[:, :2]
-            plt.figure(figsize=(5.5, 4.5))
+            # plt.figure(figsize=(5.5, 4.5))
+            plt.figure(figsize=(8, 6))
 
             profiles_short = []
             for r, g in zip(runs_g, grps_g):
