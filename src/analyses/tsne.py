@@ -91,8 +91,10 @@ def run_tsne(
 
         codes = cats.cat.codes.to_numpy()
         n_cats = len(cats.cat.categories)
-        cmap = plt.get_cmap("tab20", n_cats)
-        plt.figure(figsize=(12, 8))
+        # cmap = plt.get_cmap("tab20", n_cats)
+        cmap = plt.get_cmap("gist_ncar", n_cats)
+
+        plt.figure(figsize=(20, 18))
         sc = plt.scatter(
             out_df["tsne_x"],
             out_df["tsne_y"],
@@ -113,7 +115,7 @@ def run_tsne(
         plt.xlabel("t-SNE 1")
         plt.ylabel("t-SNE 2")
         plt.tight_layout()
-        plt.savefig(out_root / f"tsne_{group_mode}.png", dpi=200)
+        plt.savefig(out_root / f"tsne_{group_mode}.png", dpi=400)
         plt.close()
 
     return out_df
