@@ -376,25 +376,52 @@ def _fit_project_pca_for_buckets(
     if not buckets:
         return buckets, None
 
-    Xs = [d["X"] for d in buckets.values()]
+    Xs = [d["X"] for d in buckets.values() if d.get("X") is not None and d["X"].size > 0]
+    if not Xs:
+        return buckets, None
+
     X_all = np.vstack(Xs)
+    n_samples, feat_dim = X_all.shape
 
-    if X_all.shape[1] > pca_dim:
-        ipca = IncrementalPCA(n_components=pca_dim, batch_size=4096)
-        # single pass is fine; data is already a sample
-        if X_all.shape[0] > 4096:
-            for j in range(0, X_all.shape[0], 4096):
-                ipca.partial_fit(X_all[j : j + 4096])
-        else:
-            ipca.partial_fit(X_all)
+    # Choose a safe number of components
+    n_components = min(pca_dim, n_samples, feat_dim)
 
-        for cls, d in buckets.items():
-            buckets[cls]["Xp"] = ipca.transform(d["X"])
-    else:
+    # If we don't have enough samples for any meaningful reduction,
+    # just mean-center (no PCA object)
+    if n_components < 2:
         ipca = None
         mean = X_all.mean(axis=0, keepdims=True)
         for cls, d in buckets.items():
-            buckets[cls]["Xp"] = d["X"] - mean
+            X = d["X"]
+            if X is None or X.size == 0:
+                buckets[cls]["Xp"] = np.empty((0, feat_dim), dtype=X_all.dtype)
+            else:
+                buckets[cls]["Xp"] = X - mean
+        return buckets, ipca
+
+    # --- Proper IncrementalPCA ---
+    ipca = IncrementalPCA(n_components=n_components, batch_size=4096)
+
+    if n_samples > 4096:
+        # First batch must have >= n_components rows; 4096 is definitely enough
+        ipca.partial_fit(X_all[:max(n_components, 4096)])
+        for j in range(0, n_samples, 4096):
+            ipca.partial_fit(X_all[j : j + 4096])
+    else:
+        # n_samples >= n_components is guaranteed by n_components definition
+        ipca.partial_fit(X_all)
+
+    # Project each bucket
+    for cls, d in buckets.items():
+        X = d["X"]
+        if X is None or X.size == 0:
+            buckets[cls]["Xp"] = np.empty((0, n_components), dtype=X_all.dtype)
+            continue
+        if X.shape[1] > ipca.n_components:
+            buckets[cls]["Xp"] = ipca.transform(X)
+        else:
+            # If original dim <= n_components, just centre with ipca.mean_
+            buckets[cls]["Xp"] = X - ipca.mean_
 
     return buckets, ipca
 
