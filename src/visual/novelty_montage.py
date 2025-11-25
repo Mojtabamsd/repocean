@@ -251,7 +251,7 @@ def make_novelty_montage_per_run(
                 tiles.append((cap, pth))
 
         safe_run = _safe_slug(run_id)
-        out_path = Path(out_dir) / run_id / "novelty" / f"novelty_montage_{safe_run}.png"
+        out_path = Path(out_dir) / "novelty" / run_id / f"novelty_montage_{safe_run}.png"
         title = f"{run_id} — Top-{len(tiles)} novelty"
         _make_contact_sheet(
             images=tiles,
