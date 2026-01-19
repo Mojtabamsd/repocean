@@ -19,34 +19,37 @@ REQUIRED = {
 
 
 def build_run_index(parent_dir: str | Path) -> pd.DataFrame:
-    """
-    Original behaviour: one row per run directory.
-
-    Columns:
-      - run_id
-      - run_dir
-      - features
-      - preds
-      - model_cfg
-      - run_cfg
-    """
     parent = Path(parent_dir)
     rows = []
-    for sub in parent.iterdir():
-        if not sub.is_dir():
-            continue
-        hit = {"run_id": sub.name, "run_dir": str(sub)}
-        ok = True
+
+    def check_run(run_dir: Path):
+        hit = {"run_id": run_dir.name, "run_dir": str(run_dir)}
         for k, pat in REQUIRED.items():
-            matches = list(sub.glob(pat))
+            matches = list(run_dir.glob(pat))
             if not matches:
-                ok = False
-                break
+                return None
             hit[k] = str(matches[0])
-        if ok:
-            rows.append(hit)
-    df = pd.DataFrame(rows).sort_values("run_id").reset_index(drop=True)
-    return df
+        return hit
+
+    # ---- Case 1: parent_dir itself is a run directory
+    hit = check_run(parent)
+    if hit is not None:
+        rows.append(hit)
+
+    # ---- Case 2: parent_dir contains run subdirectories
+    else:
+        for sub in parent.iterdir():
+            if not sub.is_dir():
+                continue
+            hit = check_run(sub)
+            if hit is not None:
+                rows.append(hit)
+
+    return (
+        pd.DataFrame(rows)
+        .sort_values("run_id")
+        .reset_index(drop=True)
+    )
 
 
 def _build_name_to_index(h5f) -> dict[str, int]:
@@ -56,7 +59,8 @@ def _build_name_to_index(h5f) -> dict[str, int]:
     Assumes H5 has a dataset "image_names" with paths or filenames.
     """
     names = h5f["image_names"][:].astype(str)
-    keys = [n.replace("\\", "/").split("/")[-1] for n in names]
+    # keys = [n.replace("\\", "/").split("/")[-1] for n in names]
+    keys = [n.replace("\\", "/") for n in names]
     return {k: i for i, k in enumerate(keys)}
 
 
