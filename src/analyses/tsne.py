@@ -43,9 +43,6 @@ def run_tsne(
     if groups.empty:
         raise RuntimeError(f"No groups found under {parent_dir} (mode={group_mode})")
 
-    X_parts: list[np.ndarray] = []
-    metas: list[pd.DataFrame] = []
-
     out_root = Path(out_dir) / "tsne"
     out_root.mkdir(parents=True, exist_ok=True)
 
