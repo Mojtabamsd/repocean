@@ -29,9 +29,10 @@ def run_geometry_summary(
     group_col: str = "sample_id",     # used when group_mode == "meta"
     sample_per_group: int = 2000,
     seed: int = 42,
+    pair_samples: int = 5000,         # how many random within-group pairs for pairwise cosine stats
 ) -> pd.DataFrame:
     """
-    Geometry summary of feature space per group (run or profile/meta).
+    Geometry + sphere-aware summary of feature space per group (run or profile/meta).
 
     group_mode = "run":
         - Each run is treated as one group (original behaviour).
@@ -42,14 +43,31 @@ def run_geometry_summary(
         - Each (run_id, group_id) corresponds to a subset of indices
           (e.g. one sample_id / profile_id within that run).
 
-    For each group we compute:
-        - num_rows     : total number of feature rows in that group
-        - feat_dim     : feature dimensionality
-        - sampled      : number of rows actually used for metrics
-        - mean_norm    : mean L2 norm of features
-        - std_norm     : std of L2 norm
-        - pca_dim_90   : #PCs to reach 90% variance
-        - pca_dim_95   : #PCs to reach 95% variance
+    For each group we compute (on a sampled subset):
+        - num_rows       : total number of feature rows in that group
+        - feat_dim       : feature dimensionality
+        - sampled        : number of rows used for metrics
+
+        Basic checks:
+        - mean_norm      : mean L2 norm of features (for unit-sphere embeddings ~1)
+        - std_norm       : std of L2 norm (for unit-sphere embeddings ~0)
+
+        Sphere-aware concentration / spread:
+        - centroid_norm  : ||mean(x)||  (for unit vectors: higher => more concentrated / homogeneous)
+        - cos_p10/p50/p90: percentiles of cosine similarity to centroid direction (shape of concentration)
+
+        Pairwise similarity within group (more robust “how repetitive is this group?”):
+        - pair_cos_p10/p50/p90: percentiles of cosine similarity of random pairs within the group
+
+        Intrinsic dimensionality (still meaningful for characterising variability structure):
+        - pca_dim_90     : #PCs to reach 90% variance (computed on sampled X)
+        - pca_dim_95     : #PCs to reach 95% variance
+        - eff_rank       : effective rank from covariance eigenvalues (mode complexity)
+        - trace_cov      : trace of covariance (overall variance; on unit sphere inversely tracks centroid_norm)
+
+    Notes:
+      - If your embeddings are unit-normalized (as with F.normalize), mean_norm~1 and std_norm~0 is expected.
+      - centroid_norm and cosine-to-centroid stats become especially informative on the unit sphere.
     """
     rng = np.random.default_rng(seed)
 
@@ -79,10 +97,8 @@ def run_geometry_summary(
                 n_total, d = get_h5_shapes(h5f)
                 if n_total == 0:
                     continue
-                # Whole run
                 idx_all = np.arange(n_total, dtype=np.int64)
         else:
-            # group_mode == "meta" → one profile / sample_id
             group_id = g["group_id"]
             idx_group = g.get("indices", None)
             if idx_group is None:
@@ -90,8 +106,6 @@ def run_geometry_summary(
             idx_all = np.asarray(idx_group, dtype=np.int64)
             if idx_all.size == 0:
                 continue
-
-            # Need feature dim from file
             with open_h5(features_path) as h5f:
                 n_total, d = get_h5_shapes(h5f)
 
@@ -114,9 +128,76 @@ def run_geometry_summary(
         if X.size == 0:
             continue
 
+        n = int(X.shape[0])
+        d = int(d)
+
+        # -----------------------
+        # Basic norm sanity checks
+        # -----------------------
         norms = np.linalg.norm(X, axis=1)
-        mean_norm, std_norm = float(norms.mean()), float(norms.std())
+        mean_norm = float(norms.mean())
+        std_norm = float(norms.std())
+
+        # --------------------------------------------
+        # Sphere-aware: centroid + cosine-to-centroid
+        # --------------------------------------------
+        mu = X.mean(axis=0)
+        mu_norm = float(np.linalg.norm(mu))
+        centroid_norm = mu_norm
+
+        if mu_norm > 0:
+            mu_hat = mu / mu_norm
+            cos_to_centroid = X @ mu_hat  # if X rows are unit, this is cosine similarity
+            cos_mean = float(cos_to_centroid.mean())
+            cos_std = float(cos_to_centroid.std())
+            cos_p10 = float(np.percentile(cos_to_centroid, 10))
+            cos_p50 = float(np.percentile(cos_to_centroid, 50))
+            cos_p90 = float(np.percentile(cos_to_centroid, 90))
+        else:
+            cos_mean = cos_std = cos_p10 = cos_p50 = cos_p90 = float("nan")
+
+        # --------------------------------------------
+        # Pairwise cosine similarity (random pairs)
+        # --------------------------------------------
+        if n >= 2 and pair_samples > 0:
+            m = min(pair_samples, n * (n - 1) // 2)  # cap by possible unique pairs
+            # sample pairs with replacement (fine as a summary; cheaper)
+            i = rng.integers(0, n, size=m, dtype=np.int64)
+            j = rng.integers(0, n, size=m, dtype=np.int64)
+            # ensure i != j (simple fix loop; rare collisions when n large)
+            bad = (i == j)
+            if np.any(bad):
+                j[bad] = (j[bad] + 1) % n
+
+            # For unit vectors, dot product is cosine similarity.
+            pair_cos = np.einsum("ij,ij->i", X[i], X[j])
+            pair_cos_mean = float(pair_cos.mean())
+            pair_cos_p10 = float(np.percentile(pair_cos, 10))
+            pair_cos_p50 = float(np.percentile(pair_cos, 50))
+            pair_cos_p90 = float(np.percentile(pair_cos, 90))
+        else:
+            pair_cos_mean = pair_cos_p10 = pair_cos_p50 = pair_cos_p90 = float("nan")
+
+        # --------------------------------------------
+        # Intrinsic dims + covariance summaries
+        # --------------------------------------------
         dim90, dim95 = _intrinsic_dim_pca(X)
+
+        # trace_cov + eff_rank (eigen-spectrum of covariance)
+        # Use unweighted covariance on sampled X
+        if n >= 2:
+            Xc = X - mu
+            C = (Xc.T @ Xc) / max(n - 1, 1)  # (d x d)
+            evals = np.linalg.eigvalsh(C)
+            evals = np.clip(evals, 0.0, np.inf)
+            trace_cov = float(evals.sum())
+
+            s1 = float(evals.sum())
+            s2 = float((evals * evals).sum())
+            eff_rank = float((s1 * s1) / s2) if (s1 > 0 and s2 > 0) else 0.0
+        else:
+            trace_cov = 0.0
+            eff_rank = 0.0
 
         rows.append(
             {
@@ -124,17 +205,36 @@ def run_geometry_summary(
                 "group_id": group_id,
                 "num_rows": num_rows,
                 "feat_dim": d,
-                "sampled": X.shape[0],
+                "sampled": n,
+
                 "mean_norm": round(mean_norm, 6),
                 "std_norm": round(std_norm, 6),
+
+                "centroid_norm": round(centroid_norm, 6),
+                "cos_mean": round(cos_mean, 6),
+                "cos_std": round(cos_std, 6),
+                "cos_p10": round(cos_p10, 6),
+                "cos_p50": round(cos_p50, 6),
+                "cos_p90": round(cos_p90, 6),
+
+                "pair_cos_mean": round(pair_cos_mean, 6) if np.isfinite(pair_cos_mean) else pair_cos_mean,
+                "pair_cos_p10": round(pair_cos_p10, 6) if np.isfinite(pair_cos_p10) else pair_cos_p10,
+                "pair_cos_p50": round(pair_cos_p50, 6) if np.isfinite(pair_cos_p50) else pair_cos_p50,
+                "pair_cos_p90": round(pair_cos_p90, 6) if np.isfinite(pair_cos_p90) else pair_cos_p90,
+
+                "trace_cov": round(trace_cov, 6),
+                "eff_rank": round(eff_rank, 6),
                 "pca_dim_90": int(dim90),
                 "pca_dim_95": int(dim95),
             }
         )
 
     df = pd.DataFrame(rows).sort_values(["run_id", "group_id"]).reset_index(drop=True)
+
     out_csv = out_root / "geometry_metrics.csv"
     Path(out_csv).parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_csv, index=False)
+
     return df
+
 
