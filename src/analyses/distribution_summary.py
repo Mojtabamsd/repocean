@@ -24,7 +24,7 @@ def _normalize_weights(w: np.ndarray) -> np.ndarray:
 def _weighted_mean(X: np.ndarray, w: Optional[np.ndarray]) -> np.ndarray:
     if w is None:
         return X.mean(axis=0)
-    w = _normalize_weights(w)
+    # w = _normalize_weights(w)
     return (X * w[:, None]).sum(axis=0)
 
 
@@ -54,7 +54,7 @@ def _weighted_cov_trace_and_effrank(
         # use Gram matrix (n x n) if d is large; but here n is small (sampled), so either is fine
         C = (Xc.T @ Xc) / max(n - 1, 1)  # (d x d)
     else:
-        w = _normalize_weights(w)
+        # w = _normalize_weights(w)
         # Weighted covariance: sum_i w_i (x_i - mu)(x_i - mu)^T
         # (This is the "population" weighted cov; consistent for comparison when weights are used.)
         # trace = sum_i w_i ||x_i - mu||^2
