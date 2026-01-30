@@ -1,5 +1,5 @@
 import argparse
-from src.analyses.tsne import run_tsne
+from src.analyses.tsne import run_tsne, run_tsne_map
 
 
 def main():
@@ -15,7 +15,20 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
-    df = run_tsne(
+    # # original
+    # df = run_tsne(
+    #     parent_dir=args.parent,
+    #     out_dir=args.out_dir,
+    #     group_mode=args.group_mode,
+    #     group_col=args.group_col,
+    #     sample_per_group=args.sample_per_group,
+    #     pca_dim=args.pca_dim,
+    #     perplexity=args.perplexity,
+    #     learning_rate=args.learning_rate,
+    #     seed=args.seed,
+    # )
+
+    df = run_tsne_map(
         parent_dir=args.parent,
         out_dir=args.out_dir,
         group_mode=args.group_mode,
@@ -26,6 +39,7 @@ def main():
         learning_rate=args.learning_rate,
         seed=args.seed,
     )
+
     print(df.head())
     print(f"[INFO] Saved t-SNE CSV and plot → {args.out_dir}")
 
