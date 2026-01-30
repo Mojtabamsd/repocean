@@ -88,16 +88,17 @@ def build_group_index(
     """
     runs = build_run_index(parent_dir)
     if runs.empty:
-        return runs  # empty DataFrame
+        return runs
 
-    # --- Simple case: one group per run (backwards-compatible) ---
     if mode == "run":
         groups = runs.copy()
         groups["group_id"] = groups["run_id"]
         groups["indices"] = None
+        groups["group_lat"] = np.nan
+        groups["group_lon"] = np.nan
+        groups["n_images_in_group"] = np.nan
         return groups.reset_index(drop=True)
 
-    # --- Metadata grouping: split each run by group_col (e.g. sample_id) ---
     rows = []
 
     for _, r in runs.iterrows():
@@ -105,35 +106,39 @@ def build_group_index(
         features_path = r["features"]
         run_cfg_path = r["run_cfg"]
 
-        # Load run config + metadata to get group_col (e.g. sample_id)
         cfg = load_run_config(run_cfg_path)
         input_path = cfg.get("input_path")
         if not input_path:
-            # No metadata path in config; skip this run for meta grouping
             continue
 
-        meta = load_run_metadata(input_path, cols=["sample_id"])
+        meta = load_run_metadata(
+            input_path,
+            cols=[group_col, "sample_id", "object_lat", "object_lon"],
+            numeric_cols=["object_lat", "object_lon"],
+        )
         if meta.empty or group_col not in meta.columns:
-            # No usable metadata / column; skip
             continue
 
-        # Open H5 and build filename -> index mapping
         with open_h5(features_path) as h5f:
             name_to_idx = _build_name_to_index(h5f)
 
-        # Build a (idx, group) table by matching metadata filenames to H5 rows
         idxs = []
-        groups = []
+        gids = []
+        lats = []
+        lons = []
+
+        # IMPORTANT: meta.index is image_name already (as you set_index)
         for img, row in meta.iterrows():
             i = name_to_idx.get(img)
-            if i is not None:
-                idxs.append(i)
-                groups.append(row[group_col])
+            if i is None:
+                continue
+            idxs.append(i)
+            gids.append(row.get(group_col, None))
+            lats.append(row.get("object_lat", np.nan))
+            lons.append(row.get("object_lon", np.nan))
 
         if not idxs:
-            # No overlap between metadata and H5 for this run
             if not drop_empty:
-                # Optionally keep a "dummy" group row
                 rows.append({
                     "run_id": run_id,
                     "group_id": None,
@@ -143,15 +148,27 @@ def build_group_index(
                     "model_cfg": r["model_cfg"],
                     "run_cfg": run_cfg_path,
                     "indices": np.array([], dtype=np.int64),
+                    "group_lat": np.nan,
+                    "group_lon": np.nan,
+                    "n_images_in_group": 0,
                 })
             continue
 
-        dfm = pd.DataFrame({"idx": idxs, "group_id": groups})
+        dfm = pd.DataFrame({
+            "idx": np.asarray(idxs, dtype=np.int64),
+            "group_id": gids,
+            "lat": pd.to_numeric(pd.Series(lats), errors="coerce"),
+            "lon": pd.to_numeric(pd.Series(lons), errors="coerce"),
+        })
 
         for g_val, sub in dfm.groupby("group_id", dropna=False):
             grp_idx = np.sort(sub["idx"].values.astype(np.int64))
             if grp_idx.size == 0 and drop_empty:
                 continue
+
+            # ✅ group-level mean location (safe if missing)
+            glat = float(sub["lat"].mean()) if sub["lat"].notna().any() else np.nan
+            glon = float(sub["lon"].mean()) if sub["lon"].notna().any() else np.nan
 
             rows.append({
                 "run_id": run_id,
@@ -162,10 +179,13 @@ def build_group_index(
                 "model_cfg": r["model_cfg"],
                 "run_cfg": run_cfg_path,
                 "indices": grp_idx,
+                "group_lat": glat,
+                "group_lon": glon,
+                "n_images_in_group": int(grp_idx.size),
             })
 
     if not rows:
-        return pd.DataFrame(columns=list(runs.columns) + ["group_id", "indices"])
+        return pd.DataFrame(columns=list(runs.columns) + ["group_id", "indices", "group_lat", "group_lon", "n_images_in_group"])
 
     out = pd.DataFrame(rows)
     out = out.sort_values(["run_id", "group_id"], na_position="last").reset_index(drop=True)
