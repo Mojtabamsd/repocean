@@ -162,6 +162,74 @@ def _plot_hist(
     _save(fig, out_path)
 
 
+def plot_all_timeseries_together(
+    df: pd.DataFrame,
+    out_path: Path,
+    rolling: int = 7,
+):
+    """
+    Plot key time-series metrics together in stacked subplots.
+    Assumes df is already ordered.
+    """
+
+    metrics = [
+        ("centroid_norm", "Centroid norm\n(homogeneity ↑)"),
+        ("cos_p10", "Cosine p10\n(diversity ↑ ↓)"),
+        ("pair_cos_p50", "Pairwise cosine p50\n(repetitiveness ↑)"),
+        ("eff_rank", "Effective rank\n(complexity ↑)"),
+        ("pca_dim_90", "PCA dim 90%\n(complexity ↑)"),
+    ]
+
+    x = np.arange(len(df), dtype=int)
+
+    fig, axes = plt.subplots(
+        nrows=len(metrics),
+        ncols=1,
+        figsize=(12, 9),
+        sharex=True,
+        constrained_layout=True,
+    )
+
+    if len(metrics) == 1:
+        axes = [axes]
+
+    for ax, (col, ylabel) in zip(axes, metrics):
+        y = df[col].astype(float).values
+
+        ax.plot(
+            x, y,
+            marker="o",
+            markersize=2.5,
+            linewidth=1.1,
+            alpha=0.9,
+        )
+
+        # optional rolling mean
+        if rolling and rolling >= 3 and len(y) >= rolling:
+            roll = (
+                pd.Series(y)
+                .rolling(rolling, center=True, min_periods=max(3, rolling // 3))
+                .mean()
+                .values
+            )
+            ax.plot(x, roll, linewidth=2.2, alpha=0.9)
+
+        _set_pretty_axes(ax)
+        ax.set_ylabel(ylabel, fontsize=9)
+
+    axes[-1].set_xlabel("Deployment index (ordered)", fontsize=10)
+
+    fig.suptitle(
+        "Representation geometry summary across deployments",
+        fontsize=13,
+    )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path.with_suffix(".png"), dpi=220, bbox_inches="tight")
+    fig.savefig(out_path.with_suffix(".pdf"), bbox_inches="tight")
+    plt.close(fig)
+
+
 def visualize_geometry_metrics(
     metrics_csv: str | Path,
     out_dir: str | Path,
@@ -290,6 +358,12 @@ def visualize_geometry_metrics(
         title="Distribution of effective rank across deployments",
         xlabel="eff_rank",
         bins=28,
+    )
+
+    plot_all_timeseries_together(
+        df,
+        out_dir / "ts_all_metrics",
+        rolling=rolling,
     )
 
 
