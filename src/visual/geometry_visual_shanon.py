@@ -175,25 +175,48 @@ def scatter_with_smart_labels(
     out_png: str | Path,
     title: str,
     id_col: str | None = "group_id",
-    label_every: int = 25,   # label every Nth to keep a sense of ordering
-    label_outliers: int = 8, # label top/bottom K on y and on x
+    label_every: int = 25,
+    label_outliers: int = 8,
+    size_col: str | None = "sampled",
+    size_min: float = 18.0,
+    size_max: float = 90.0,
+    size_clip_q: float = 95.0,
+    show_size_legend: bool = True,
 ):
     x = pd.to_numeric(df[xcol], errors="coerce").values
     y = pd.to_numeric(df[ycol], errors="coerce").values
 
+    # labels
     if id_col and id_col in df.columns:
         labels = df[id_col].astype(str).tolist()
     else:
         labels = [str(i) for i in range(len(df))]
 
-    n = len(df)
+    # marker sizes
+    if size_col and (size_col in df.columns):
+        sraw = pd.to_numeric(df[size_col], errors="coerce").fillna(0.0).values
+        s_pos = sraw[sraw > 0]
+        if len(s_pos) > 0:
+            clip_hi = np.nanpercentile(s_pos, size_clip_q)
+            s = np.clip(sraw, 0, clip_hi)
+            s_norm = s / (s.max() if s.max() > 0 else 1.0)
+            sizes = size_min + (size_max - size_min) * s_norm
+        else:
+            sizes = np.full(len(df), (size_min + size_max) / 2.0)
+    else:
+        sizes = np.full(len(df), 30.0)
+
     fig, ax = plt.subplots(figsize=(6.6, 5.8))
-    ax.scatter(x, y, alpha=0.7)
+
+    # Force ONE color for everything (points + legend)
+    point_color = "C0"
+
+    ax.scatter(x, y, s=sizes, alpha=0.7, color=point_color)
 
     # Indices to label: extremes + every Nth
+    n = len(df)
     idxs = set(range(0, n, label_every))
 
-    # extremes on x and y
     good_x = np.isfinite(x)
     good_y = np.isfinite(y)
     if good_x.any():
@@ -215,10 +238,39 @@ def scatter_with_smart_labels(
     ax.set_xlabel(xcol)
     ax.set_ylabel(ycol)
     ax.set_title(title)
-    _pretty(ax)
+    ax.grid(True, alpha=0.25)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    # ---- size legend using 1st / 50th / 100th percentiles (min/median/max)
+    if show_size_legend and size_col and (size_col in df.columns):
+        sraw = pd.to_numeric(df[size_col], errors="coerce").fillna(0.0).values
+        s_pos = sraw[sraw > 0]
+        if len(s_pos) > 0:
+            # 1st, 50th, 100th percentiles
+            qvals = np.percentile(s_pos, [1, 50, 100])
+
+            # use the SAME sizing transform as points (including clip at p95)
+            clip_hi = np.percentile(s_pos, size_clip_q)
+            q_clip = np.clip(qvals, 0, clip_hi)
+
+            # map qvals to marker sizes
+            q_sizes = size_min + (size_max - size_min) * (q_clip / (clip_hi if clip_hi > 0 else 1.0))
+
+            handles = [
+                ax.scatter([], [], s=q_sizes[0], alpha=0.7, color=point_color,
+                           label=f"{size_col}: p01={int(qvals[0])}"),
+                ax.scatter([], [], s=q_sizes[1], alpha=0.7, color=point_color,
+                           label=f"{size_col}: p50={int(qvals[1])}"),
+                ax.scatter([], [], s=q_sizes[2], alpha=0.7, color=point_color,
+                           label=f"{size_col}: p100={int(qvals[2])}"),
+            ]
+            ax.legend(handles=handles, frameon=False, loc="best", fontsize=8)
+
     plt.tight_layout()
     fig.savefig(out_png, dpi=220)
     plt.close(fig)
+
 
 
 def plot_zscore_heatmap(Z: pd.DataFrame, out_png: str | Path, title: str):
@@ -289,19 +341,27 @@ def compare_three_metrics_visually(
     scatter_with_smart_labels(
         df, "centroid_norm", "Shannon",
         out_dir / "sc_shannon_vs_centroid.png",
-        title="Shannon vs centroid_norm (labels: outliers + every 25th)",
+        # title="Shannon vs centroid_norm (labels: outliers + every 25th)",
+        title="Concentration vs Balance",
         id_col=id_col,
     )
     scatter_with_smart_labels(
         df, "eff_rank", "Shannon",
         out_dir / "sc_shannon_vs_effrank.png",
-        title="Shannon vs eff_rank (labels: outliers + every 25th)",
+        title="Shannon vs eff_rank",
         id_col=id_col,
     )
     scatter_with_smart_labels(
         df, "centroid_norm", "eff_rank",
         out_dir / "sc_effrank_vs_centroid.png",
-        title="eff_rank vs centroid_norm (labels: outliers + every 25th)",
+        title="Concentration vs complexity",
+        id_col=id_col,
+    )
+
+    scatter_with_smart_labels(
+        df, "centroid_norm", "cos_p10",
+        out_dir / "sc_centroid_vs_cos_p10.png",
+        title="Concentration vs diversity",
         id_col=id_col,
     )
 
