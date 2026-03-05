@@ -52,6 +52,8 @@ def plot_all_timeseries_together_with_shannon(
         how="left",
         validate="one_to_one" if sh[shannon_join_col].is_unique else "many_to_one",
     )
+    # exp(Shannon) (effective number of classes)
+    df["Shannon_eff"] = np.exp(pd.to_numeric(df["Shannon"], errors="coerce"))
 
     # ---- metrics to plot (add Shannon)
     metrics = [
@@ -62,6 +64,8 @@ def plot_all_timeseries_together_with_shannon(
         ("eff_rank", "Effective rank\n(complexity ↑)"),
         # ("pca_dim_90", "PCA dim 90%\n(complexity ↑)"),
     ]
+
+    metrics.append(("Shannon_eff", "exp(Shannon)\n(effective #classes ↑)"))
 
     # Optionally add effective species if present
     # if "Effective_species" in df.columns:
@@ -362,6 +366,21 @@ def compare_three_metrics_visually(
         df, "centroid_norm", "cos_p10",
         out_dir / "sc_centroid_vs_cos_p10.png",
         title="Concentration vs diversity",
+        id_col=id_col,
+    )
+
+    # exp(Shannon) scatters
+    scatter_with_smart_labels(
+        df, "centroid_norm", "Shannon_eff",
+        out_dir / "sc_expShannon_vs_centroid.png",
+        title="Concentration vs Effective diversity (exp(Shannon))",
+        id_col=id_col,
+    )
+
+    scatter_with_smart_labels(
+        df, "eff_rank", "Shannon_eff",
+        out_dir / "sc_expShannon_vs_effrank.png",
+        title="Complexity vs Effective diversity (exp(Shannon))",
         id_col=id_col,
     )
 
