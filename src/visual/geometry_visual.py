@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
+from scipy.cluster.hierarchy import linkage, dendrogram, leaves_list
+from scipy.spatial.distance import squareform
 
 # Optional: parse datetime from your group_id for nicer tick labels
 _gid_re = re.compile(
@@ -314,6 +316,137 @@ def plot_all_timeseries_together(
     plt.close(fig)
 
 
+def _cluster_order_from_similarity(M: pd.DataFrame, method: str = "average") -> np.ndarray:
+    """
+    Compute hierarchical clustering leaf order from a similarity matrix.
+    Converts similarity to distance as: d = 1 - sim
+    """
+    A = M.astype(float).values.copy()
+
+    # numerical safety
+    A = np.clip(A, -1.0, 1.0)
+
+    # similarity -> distance
+    D = 1.0 - A
+
+    # clean diagonal
+    np.fill_diagonal(D, 0.0)
+
+    # force symmetry just in case
+    D = 0.5 * (D + D.T)
+
+    # condensed distance for scipy linkage
+    d_condensed = squareform(D, checks=False)
+    Z = linkage(d_condensed, method=method)
+    order = leaves_list(Z)
+    return order
+
+
+def _plot_clustered_centroid_heatmap(
+    M: pd.DataFrame,
+    out_path: Path,
+    title: str = "Clustered centroid cosine similarity between deployments",
+    method: str = "average",
+):
+    """
+    Plot a clustered heatmap with deployments reordered by hierarchical clustering.
+    """
+    A = M.astype(float).values.copy()
+    n = A.shape[0]
+
+    if n == 0:
+        return
+    if n == 1:
+        fig = plt.figure(figsize=(5, 4))
+        ax = fig.add_subplot(111)
+        im = ax.imshow(A, aspect="auto", interpolation="nearest", vmin=-1, vmax=1)
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        ax.set_title(title, fontsize=12)
+        ax.set_xticks([0])
+        ax.set_yticks([0])
+        ax.set_xticklabels(M.columns.tolist(), rotation=90, fontsize=8)
+        ax.set_yticklabels(M.index.tolist(), fontsize=8)
+        _save(fig, out_path)
+        return
+
+    order = _cluster_order_from_similarity(M, method=method)
+    M_ord = M.iloc[order, order]
+
+    A_ord = M_ord.astype(float).values
+    labels = M_ord.index.astype(str).tolist()
+
+    fig_w = max(8, min(18, 0.28 * n + 5))
+    fig_h = max(7, min(16, 0.28 * n + 4))
+
+    fig = plt.figure(figsize=(fig_w, fig_h))
+    ax = fig.add_subplot(111)
+
+    im = ax.imshow(A_ord, aspect="auto", interpolation="nearest", vmin=-1, vmax=1)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("centroid cosine", fontsize=10)
+
+    ax.set_title(title, fontsize=12)
+
+    if n <= 60:
+        ax.set_xticks(np.arange(n))
+        ax.set_yticks(np.arange(n))
+        ax.set_xticklabels(labels, rotation=90, fontsize=7)
+        ax.set_yticklabels(labels, fontsize=7)
+    else:
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_xlabel("Deployments (clustered order)", fontsize=10)
+        ax.set_ylabel("Deployments (clustered order)", fontsize=10)
+
+    _save(fig, out_path)
+
+
+def _plot_centroid_dendrogram(
+    M: pd.DataFrame,
+    out_path: Path,
+    title: str = "Hierarchical clustering of deployments by centroid direction",
+    method: str = "average",
+):
+    """
+    Plot a dendrogram from centroid cosine similarity matrix.
+    """
+    A = M.astype(float).values.copy()
+    n = A.shape[0]
+
+    if n <= 1:
+        return
+
+    A = np.clip(A, -1.0, 1.0)
+    D = 1.0 - A
+    np.fill_diagonal(D, 0.0)
+    D = 0.5 * (D + D.T)
+
+    d_condensed = squareform(D, checks=False)
+    Z = linkage(d_condensed, method=method)
+
+    fig_w = max(10, min(22, 0.18 * n + 8))
+    fig_h = 5.8 if n < 120 else 7.0
+
+    fig = plt.figure(figsize=(fig_w, fig_h))
+    ax = fig.add_subplot(111)
+
+    dendrogram(
+        Z,
+        labels=M.index.astype(str).tolist(),
+        leaf_rotation=90,
+        leaf_font_size=6 if n > 80 else 7,
+        ax=ax,
+        color_threshold=None,
+    )
+
+    ax.set_title(title, fontsize=12)
+    ax.set_ylabel("Distance = 1 - centroid cosine", fontsize=10)
+    ax.set_xlabel("Deployments", fontsize=10)
+    _set_pretty_axes(ax)
+
+    _save(fig, out_path)
+
+
 def visualize_geometry_metrics(
     metrics_csv: str | Path,
     out_dir: str | Path,
@@ -362,6 +495,21 @@ def visualize_geometry_metrics(
                 out_dir / "heatmap_centroid_cosine_matrix",
                 title="Centroid cosine similarity between deployments",
             )
+
+            _plot_clustered_centroid_heatmap(
+                M,
+                out_dir / "heatmap_centroid_cosine_matrix_clustered",
+                title="Clustered centroid cosine similarity between deployments",
+                method="average",   # can try: "complete", "ward" not ideal here, "single"
+            )
+
+            _plot_centroid_dendrogram(
+                M,
+                out_dir / "dendrogram_centroid_cosine",
+                title="Hierarchical clustering of deployments by centroid direction",
+                method="average",
+            )
+
             _plot_offdiag_hist(
                 M,
                 out_dir / "hist_centroid_cosine_offdiag",
