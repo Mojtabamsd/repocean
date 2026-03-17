@@ -337,6 +337,15 @@ def visualize_geometry_metrics(
         annotate=True,
     )
 
+    _plot_scatter(
+        df, "centroid_norm", "cos_p10",
+        out_dir / "sc_centroid_vs_cos_p10",
+        title="Concentration vs diversity",
+        xlabel="centroid_norm",
+        ylabel="cos_p10",
+        annotate=True,
+    )
+
     # ---- Histograms
     _plot_hist(
         df, "centroid_norm",
@@ -369,8 +378,10 @@ def visualize_geometry_metrics(
 
 if __name__ == "__main__":
     visualize_geometry_metrics(
-        metrics_csv=r"C:\alr4\analysis\geometry\geometry_metrics.csv",
-        out_dir=r"C:\alr4\analysis\geometry",
+        # metrics_csv=r"C:\alr4\analysis\geometry\geometry_metrics.csv",
+        # out_dir=r"C:\alr4\analysis\geometry",
+        metrics_csv=r"C:\alr4\analysis\geometry_all\geometry_metrics.csv",
+        out_dir=r"C:\alr4\analysis\geometry_all",
         run_id=None,   # or "prediction_parti20260119121141"
         rolling=7,     # set 0 to disable rolling mean overlay
     )
