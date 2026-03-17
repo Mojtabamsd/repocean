@@ -34,40 +34,15 @@ def run_geometry_summary(
     """
     Geometry + sphere-aware summary of feature space per group (run or profile/meta).
 
-    group_mode = "run":
-        - Each run is treated as one group (original behaviour).
-        - group_id column is set equal to run_id.
+    Additional output:
+        - centroid cosine similarity between groups
+          (captures whether two groups live in similar directions/regions
+           of embedding space, not just whether their internal structure is similar)
 
-    group_mode = "meta":
-        - Use build_group_index(..., mode="meta", group_col=group_col)
-        - Each (run_id, group_id) corresponds to a subset of indices
-          (e.g. one sample_id / profile_id within that run).
-
-    For each group we compute (on a sampled subset):
-        - num_rows       : total number of feature rows in that group
-        - feat_dim       : feature dimensionality
-        - sampled        : number of rows used for metrics
-
-        Basic checks:
-        - mean_norm      : mean L2 norm of features (for unit-sphere embeddings ~1)
-        - std_norm       : std of L2 norm (for unit-sphere embeddings ~0)
-
-        Sphere-aware concentration / spread:
-        - centroid_norm  : ||mean(x)||  (for unit vectors: higher => more concentrated / homogeneous)
-        - cos_p10/p50/p90: percentiles of cosine similarity to centroid direction (shape of concentration)
-
-        Pairwise similarity within group (more robust “how repetitive is this group?”):
-        - pair_cos_p10/p50/p90: percentiles of cosine similarity of random pairs within the group
-
-        Intrinsic dimensionality (still meaningful for characterising variability structure):
-        - pca_dim_90     : #PCs to reach 90% variance (computed on sampled X)
-        - pca_dim_95     : #PCs to reach 95% variance
-        - eff_rank       : effective rank from covariance eigenvalues (mode complexity)
-        - trace_cov      : trace of covariance (overall variance; on unit sphere inversely tracks centroid_norm)
-
-    Notes:
-      - If your embeddings are unit-normalized (as with F.normalize), mean_norm~1 and std_norm~0 is expected.
-      - centroid_norm and cosine-to-centroid stats become especially informative on the unit sphere.
+    Saves:
+        - geometry/geometry_metrics.csv
+        - geometry/centroid_cosine_matrix.csv
+        - geometry/centroid_cosine_pairs.csv
     """
     rng = np.random.default_rng(seed)
 
@@ -85,6 +60,8 @@ def run_geometry_summary(
         )
 
     rows = []
+    centroid_dirs = []   # store unit centroid vectors for pairwise comparison
+    centroid_keys = []   # store identifiers aligned with centroid_dirs
 
     for _, g in groups.iterrows():
         run_id = g["run_id"]
@@ -153,23 +130,26 @@ def run_geometry_summary(
             cos_p10 = float(np.percentile(cos_to_centroid, 10))
             cos_p50 = float(np.percentile(cos_to_centroid, 50))
             cos_p90 = float(np.percentile(cos_to_centroid, 90))
+
+            # save centroid direction for between-group comparison
+            centroid_dirs.append(mu_hat.astype(np.float32))
+            centroid_keys.append((run_id, group_id))
         else:
+            mu_hat = None
             cos_mean = cos_std = cos_p10 = cos_p50 = cos_p90 = float("nan")
 
         # --------------------------------------------
         # Pairwise cosine similarity (random pairs)
         # --------------------------------------------
         if n >= 2 and pair_samples > 0:
-            m = min(pair_samples, n * (n - 1) // 2)  # cap by possible unique pairs
-            # sample pairs with replacement (fine as a summary; cheaper)
+            m = min(pair_samples, n * (n - 1) // 2)
             i = rng.integers(0, n, size=m, dtype=np.int64)
             j = rng.integers(0, n, size=m, dtype=np.int64)
-            # ensure i != j (simple fix loop; rare collisions when n large)
+
             bad = (i == j)
             if np.any(bad):
                 j[bad] = (j[bad] + 1) % n
 
-            # For unit vectors, dot product is cosine similarity.
             pair_cos = np.einsum("ij,ij->i", X[i], X[j])
             pair_cos_mean = float(pair_cos.mean())
             pair_cos_p10 = float(np.percentile(pair_cos, 10))
@@ -183,11 +163,9 @@ def run_geometry_summary(
         # --------------------------------------------
         dim90, dim95 = _intrinsic_dim_pca(X)
 
-        # trace_cov + eff_rank (eigen-spectrum of covariance)
-        # Use unweighted covariance on sampled X
         if n >= 2:
             Xc = X - mu
-            C = (Xc.T @ Xc) / max(n - 1, 1)  # (d x d)
+            C = (Xc.T @ Xc) / max(n - 1, 1)
             evals = np.linalg.eigvalsh(C)
             evals = np.clip(evals, 0.0, np.inf)
             trace_cov = float(evals.sum())
@@ -232,9 +210,36 @@ def run_geometry_summary(
     df = pd.DataFrame(rows).sort_values(["run_id", "group_id"]).reset_index(drop=True)
 
     out_csv = out_root / "geometry_metrics.csv"
-    Path(out_csv).parent.mkdir(parents=True, exist_ok=True)
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_csv, index=False)
 
+    # -------------------------------------------------
+    # pairwise centroid cosine similarity by group
+    # -------------------------------------------------
+    if len(centroid_dirs) > 0:
+        U = np.stack(centroid_dirs, axis=0)  # shape: (G, D)
+        sim = U @ U.T                        # cosine similarity because rows are unit vectors
+
+        labels = [f"{run_id}::{group_id}" for run_id, group_id in centroid_keys]
+        sim_df = pd.DataFrame(sim, index=labels, columns=labels)
+        sim_df.to_csv(out_root / "centroid_cosine_matrix.csv")
+
+        pair_rows = []
+        G = len(centroid_keys)
+        for a in range(G):
+            run_a, group_a = centroid_keys[a]
+            for b in range(a + 1, G):
+                run_b, group_b = centroid_keys[b]
+                pair_rows.append(
+                    {
+                        "run_id_a": run_a,
+                        "group_id_a": group_a,
+                        "run_id_b": run_b,
+                        "group_id_b": group_b,
+                        "centroid_cosine": round(float(sim[a, b]), 6),
+                    }
+                )
+
+        pd.DataFrame(pair_rows).to_csv(out_root / "centroid_cosine_pairs.csv", index=False)
+
     return df
-
-
