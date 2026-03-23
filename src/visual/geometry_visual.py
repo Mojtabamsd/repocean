@@ -386,6 +386,28 @@ def _plot_zscore_heatmap(df: pd.DataFrame, cols: list[str], out_path: Path, titl
     plt.close(fig)
 
 
+def _plot_rank_overlay(df: pd.DataFrame, cols: list[str], out_path: Path, title: str):
+    cols = [c for c in cols if c in df.columns]
+    if not cols:
+        return
+
+    x = np.arange(len(df), dtype=int)
+    ranks = pd.DataFrame({c: pd.to_numeric(df[c], errors="coerce").rank(method="average") for c in cols})
+
+    fig, ax = plt.subplots(figsize=(12, 4.2))
+    for c in cols:
+        ax.plot(x, ranks[c].values, linewidth=1.4, label=c)
+    ax.set_title(title)
+    ax.set_xlabel("Deployment index (ordered)")
+    ax.set_ylabel("Rank (higher = larger value)")
+    _set_pretty_axes(ax)
+    ax.legend(frameon=False, ncol=min(len(cols), 3), fontsize=9)
+    plt.tight_layout()
+    fig.savefig(out_path.with_suffix(".png"), dpi=220, bbox_inches="tight")
+    fig.savefig(out_path.with_suffix(".pdf"), bbox_inches="tight")
+    plt.close(fig)
+
+
 def visualize_geometry_metrics_merged(
     metrics_csv: str | Path,
     out_dir: str | Path,
@@ -456,7 +478,14 @@ def visualize_geometry_metrics_merged(
                     annotate=True,
                 )
 
-    # Keep a single compact comparison heatmap instead of both rank overlay and z-score overlay
+    # Keep the compact rank overlay plus one z-score heatmap
+    _plot_rank_overlay(
+        df,
+        cols=["shannon", "centroid_norm", "eff_rank"],
+        out_path=out_dir / "rank_overlay",
+        title="Rank overlay: Shannon vs centroid norm vs effective rank",
+    )
+
     _plot_zscore_heatmap(
         df,
         cols=["centroid_norm", "shannon", "exp_shannon", "cos_p10", "pair_cos_p50", "eff_rank"],
