@@ -9,10 +9,10 @@ from matplotlib.ticker import MaxNLocator
 from scipy.cluster.hierarchy import linkage, dendrogram, leaves_list
 from scipy.spatial.distance import squareform
 
-# Optional: parse datetime from your group_id for nicer tick labels
 _gid_re = re.compile(
     r"^(?P<cruise>[^_]+)_(?P<date>\d{8})_(?P<hhmm>\d{4})_(?P<seg>\d{4})_d(?P<dep>\d+)$"
 )
+
 
 def _maybe_add_dt(df: pd.DataFrame) -> pd.DataFrame:
     if "dt" in df.columns:
@@ -21,7 +21,11 @@ def _maybe_add_dt(df: pd.DataFrame) -> pd.DataFrame:
     for gid in df["group_id"].astype(str).tolist():
         m = _gid_re.match(gid)
         if m:
-            dt = pd.to_datetime(m.group("date") + m.group("hhmm"), format="%Y%m%d%H%M", errors="coerce")
+            dt = pd.to_datetime(
+                m.group("date") + m.group("hhmm"),
+                format="%Y%m%d%H%M",
+                errors="coerce",
+            )
             dts.append(dt)
         else:
             dts.append(pd.NaT)
@@ -48,10 +52,12 @@ def _save(fig: plt.Figure, out_path: Path):
 
 
 def _annotate_extremes(ax: plt.Axes, x: np.ndarray, y: np.ndarray, labels: list[str], k: int = 3):
-    if len(y) < (2 * k + 1):
+    good = np.isfinite(y)
+    if good.sum() < (2 * k + 1):
         return
-    idx = np.argsort(y)
-    picks = np.concatenate([idx[:k], idx[-k:]])
+    idx = np.where(good)[0]
+    order = idx[np.argsort(y[good])]
+    picks = np.concatenate([order[:k], order[-k:]])
     for i in picks:
         ax.annotate(
             labels[i],
@@ -72,13 +78,15 @@ def _plot_series(
     add_rolling: int = 0,
     annotate: bool = True,
 ):
+    if col not in df.columns:
+        return
+
     x = np.arange(len(df), dtype=int)
-    y = df[col].astype(float).values
+    y = pd.to_numeric(df[col], errors="coerce").values
     labels = df["group_id"].astype(str).tolist()
 
     fig = plt.figure(figsize=(11.5, 4.2))
     ax = fig.add_subplot(111)
-
     ax.plot(x, y, marker="o", linewidth=1.2, markersize=2.6)
 
     if add_rolling and add_rolling >= 3 and len(df) >= add_rolling:
@@ -89,7 +97,6 @@ def _plot_series(
     ax.set_title(title, fontsize=12)
     ax.set_xlabel("Deployment index", fontsize=10)
     ax.set_ylabel(ylabel, fontsize=10)
-
     _set_pretty_axes(ax)
 
     if annotate:
@@ -107,56 +114,60 @@ def _plot_scatter(
     xlabel: str,
     ylabel: str,
     annotate: bool = True,
+    id_col: str = "group_id",
 ):
-    x = df[xcol].astype(float).values
-    y = df[ycol].astype(float).values
-    labels = df["group_id"].astype(str).tolist()
+    if xcol not in df.columns or ycol not in df.columns:
+        return
+
+    x = pd.to_numeric(df[xcol], errors="coerce").values
+    y = pd.to_numeric(df[ycol], errors="coerce").values
+    labels = df[id_col].astype(str).tolist() if id_col in df.columns else [str(i) for i in range(len(df))]
 
     if "sampled" in df.columns:
-        s = df["sampled"].astype(float).fillna(0.0).values
-        s = np.clip(s, 0, np.nanpercentile(s, 95) if np.any(s > 0) else 1.0)
-        sizes = 18 + 70 * (s / (s.max() if s.max() > 0 else 1.0))
+        s = pd.to_numeric(df["sampled"], errors="coerce").fillna(0.0).values
+        s_pos = s[s > 0]
+        if len(s_pos) > 0:
+            clip_hi = np.nanpercentile(s_pos, 95)
+            s = np.clip(s, 0, clip_hi)
+            sizes = 18 + 70 * (s / (s.max() if s.max() > 0 else 1.0))
+        else:
+            sizes = np.full(len(df), 30.0)
     else:
-        sizes = 30
+        sizes = np.full(len(df), 30.0)
 
     fig = plt.figure(figsize=(6.8, 5.4))
     ax = fig.add_subplot(111)
-
     ax.scatter(x, y, s=sizes, alpha=0.7)
 
     ax.set_title(title, fontsize=12)
     ax.set_xlabel(xlabel, fontsize=10)
     ax.set_ylabel(ylabel, fontsize=10)
-
     _set_pretty_axes(ax)
 
     if annotate and len(df) >= 8:
-        idx = np.argsort(y)
-        picks = np.concatenate([idx[:3], idx[-3:]])
-        for i in picks:
-            ax.annotate(labels[i], (x[i], y[i]), fontsize=8)
+        good = np.isfinite(x) & np.isfinite(y)
+        if good.any():
+            idx = np.where(good)[0]
+            score = pd.Series(np.abs((x[good] - np.nanmean(x[good])) / (np.nanstd(x[good]) + 1e-12)) +
+                              np.abs((y[good] - np.nanmean(y[good])) / (np.nanstd(y[good]) + 1e-12))).values
+            pick = idx[np.argsort(score)[-6:]]
+            for i in pick:
+                ax.annotate(labels[i], (x[i], y[i]), fontsize=8, xytext=(4, 4), textcoords="offset points")
 
     _save(fig, out_path)
 
 
-def _plot_hist(
-    df: pd.DataFrame,
-    col: str,
-    out_path: Path,
-    title: str,
-    xlabel: str,
-    bins: int = 30,
-):
-    vals = df[col].astype(float).dropna().values
+def _plot_hist(df: pd.DataFrame, col: str, out_path: Path, title: str, xlabel: str, bins: int = 30):
+    if col not in df.columns:
+        return
+    vals = pd.to_numeric(df[col], errors="coerce").dropna().values
 
     fig = plt.figure(figsize=(6.8, 4.8))
     ax = fig.add_subplot(111)
-
     ax.hist(vals, bins=bins, alpha=0.9)
     ax.set_title(title, fontsize=12)
     ax.set_xlabel(xlabel, fontsize=10)
     ax.set_ylabel("Count", fontsize=10)
-
     _set_pretty_axes(ax)
     _save(fig, out_path)
 
@@ -181,166 +192,25 @@ def _compute_mean_centroid_cosine_to_others(M: pd.DataFrame) -> pd.Series:
 def _attach_centroid_cosine_summary(df: pd.DataFrame, M: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out["group_key"] = out["run_id"].astype(str) + "::" + out["group_id"].astype(str)
-
     mean_sim = _compute_mean_centroid_cosine_to_others(M)
-    out = out.merge(
+    return out.merge(
         mean_sim.rename("mean_centroid_cosine_to_others"),
         left_on="group_key",
         right_index=True,
         how="left",
         validate="one_to_one",
     )
-    return out
-
-
-def _plot_matrix_heatmap(
-    M: pd.DataFrame,
-    out_path: Path,
-    title: str = "Centroid cosine similarity between deployments",
-):
-    A = M.astype(float).values
-    n = A.shape[0]
-
-    fig_w = max(7, min(16, 0.28 * n + 4))
-    fig_h = max(6, min(14, 0.28 * n + 3))
-
-    fig = plt.figure(figsize=(fig_w, fig_h))
-    ax = fig.add_subplot(111)
-
-    im = ax.imshow(A, aspect="auto", interpolation="nearest", vmin=-1, vmax=1)
-    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label("centroid cosine", fontsize=10)
-
-    ax.set_title(title, fontsize=12)
-    labels = [l.split("::")[-1] for l in M.index]
-
-    if n <= 200:
-        ax.set_xticks(np.arange(n))
-        ax.set_yticks(np.arange(n))
-        ax.set_xticklabels(labels, rotation=90, fontsize=7)
-        ax.set_yticklabels(labels, fontsize=7)
-    else:
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_xlabel("Deployments", fontsize=10)
-        ax.set_ylabel("Deployments", fontsize=10)
-
-    _save(fig, out_path)
-
-
-def _plot_offdiag_hist(
-    M: pd.DataFrame,
-    out_path: Path,
-    bins: int = 30,
-):
-    A = M.astype(float).values
-    if A.shape[0] < 2:
-        vals = np.array([], dtype=float)
-    else:
-        mask = ~np.eye(A.shape[0], dtype=bool)
-        vals = A[mask]
-
-    fig = plt.figure(figsize=(6.8, 4.8))
-    ax = fig.add_subplot(111)
-
-    ax.hist(vals, bins=bins, alpha=0.9)
-    ax.set_title("Distribution of centroid cosine between deployments", fontsize=12)
-    ax.set_xlabel("centroid cosine (off-diagonal)", fontsize=10)
-    ax.set_ylabel("Count", fontsize=10)
-
-    _set_pretty_axes(ax)
-    _save(fig, out_path)
-
-
-def plot_all_timeseries_together(
-    df: pd.DataFrame,
-    out_path: Path,
-    rolling: int = 7,
-):
-    metrics = [
-        ("centroid_norm", "Centroid norm\n(homogeneity ↑)"),
-        ("mean_centroid_cosine_to_others", "Mean centroid cosine\nto others ↑"),
-        ("cos_p10", "Cosine p10\n(diversity ↑ ↓)"),
-        ("pair_cos_p50", "Pairwise cosine p50\n(repetitiveness ↑)"),
-        ("eff_rank", "Effective rank\n(complexity ↑)"),
-        ("pca_dim_90", "PCA dim 90%\n(complexity ↑)"),
-    ]
-
-    metrics = [(c, y) for c, y in metrics if c in df.columns]
-
-    x = np.arange(len(df), dtype=int)
-
-    fig, axes = plt.subplots(
-        nrows=len(metrics),
-        ncols=1,
-        figsize=(12, 10),
-        sharex=True,
-        constrained_layout=True,
-    )
-
-    if len(metrics) == 1:
-        axes = [axes]
-
-    for ax, (col, ylabel) in zip(axes, metrics):
-        y = df[col].astype(float).values
-
-        ax.plot(
-            x, y,
-            marker="o",
-            markersize=2.5,
-            linewidth=1.1,
-            alpha=0.9,
-        )
-
-        if rolling and rolling >= 3 and len(y) >= rolling:
-            roll = (
-                pd.Series(y)
-                .rolling(rolling, center=True, min_periods=max(3, rolling // 3))
-                .mean()
-                .values
-            )
-            ax.plot(x, roll, linewidth=2.2, alpha=0.9)
-
-        _set_pretty_axes(ax)
-        ax.set_ylabel(ylabel, fontsize=9)
-
-    axes[-1].set_xlabel("Deployment index (ordered)", fontsize=10)
-
-    fig.suptitle(
-        "Representation geometry summary across deployments",
-        fontsize=13,
-    )
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path.with_suffix(".png"), dpi=220, bbox_inches="tight")
-    fig.savefig(out_path.with_suffix(".pdf"), bbox_inches="tight")
-    plt.close(fig)
 
 
 def _cluster_order_from_similarity(M: pd.DataFrame, method: str = "average") -> np.ndarray:
-    """
-    Compute hierarchical clustering leaf order from a similarity matrix.
-    Converts similarity to distance as: d = 1 - sim
-    """
     A = M.astype(float).values.copy()
-
-    # numerical safety
     A = np.clip(A, -1.0, 1.0)
-
-    # similarity -> distance
     D = 1.0 - A
-
-    # clean diagonal
     np.fill_diagonal(D, 0.0)
-
-    # force symmetry just in case
     D = 0.5 * (D + D.T)
-
-    # condensed distance for scipy linkage
     d_condensed = squareform(D, checks=False)
     Z = linkage(d_condensed, method=method)
-    order = leaves_list(Z)
-    return order
+    return leaves_list(Z)
 
 
 def _plot_clustered_centroid_heatmap(
@@ -349,43 +219,25 @@ def _plot_clustered_centroid_heatmap(
     title: str = "Clustered centroid cosine similarity between deployments",
     method: str = "average",
 ):
-    """
-    Plot a clustered heatmap with deployments reordered by hierarchical clustering.
-    """
     A = M.astype(float).values.copy()
     n = A.shape[0]
-
     if n == 0:
         return
-    if n == 1:
-        fig = plt.figure(figsize=(5, 4))
-        ax = fig.add_subplot(111)
-        im = ax.imshow(A, aspect="auto", interpolation="nearest", vmin=-1, vmax=1)
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        ax.set_title(title, fontsize=12)
-        ax.set_xticks([0])
-        ax.set_yticks([0])
-        ax.set_xticklabels(M.columns.tolist(), rotation=90, fontsize=8)
-        ax.set_yticklabels(M.index.tolist(), fontsize=8)
-        _save(fig, out_path)
-        return
 
-    order = _cluster_order_from_similarity(M, method=method)
-    M_ord = M.iloc[order, order]
+    if n > 1:
+        order = _cluster_order_from_similarity(M, method=method)
+        M = M.iloc[order, order]
 
-    A_ord = M_ord.astype(float).values
-    labels = M_ord.index.astype(str).tolist()
-
+    A_ord = M.astype(float).values
+    labels = [l.split("::")[-1] for l in M.index.astype(str).tolist()]
     fig_w = max(8, min(18, 0.28 * n + 5))
     fig_h = max(7, min(16, 0.28 * n + 4))
 
     fig = plt.figure(figsize=(fig_w, fig_h))
     ax = fig.add_subplot(111)
-
     im = ax.imshow(A_ord, aspect="auto", interpolation="nearest", vmin=-1, vmax=1)
     cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cbar.set_label("centroid cosine", fontsize=10)
-
     ax.set_title(title, fontsize=12)
 
     if n <= 60:
@@ -408,12 +260,8 @@ def _plot_centroid_dendrogram(
     title: str = "Hierarchical clustering of deployments by centroid direction",
     method: str = "average",
 ):
-    """
-    Plot a dendrogram from centroid cosine similarity matrix.
-    """
     A = M.astype(float).values.copy()
     n = A.shape[0]
-
     if n <= 1:
         return
 
@@ -421,23 +269,18 @@ def _plot_centroid_dendrogram(
     D = 1.0 - A
     np.fill_diagonal(D, 0.0)
     D = 0.5 * (D + D.T)
-
     d_condensed = squareform(D, checks=False)
     Z = linkage(d_condensed, method=method)
 
     fig_w = max(10, min(22, 0.18 * n + 8))
     fig_h = 5.8 if n < 120 else 7.0
-
     fig = plt.figure(figsize=(fig_w, fig_h))
     ax = fig.add_subplot(111)
 
-    labels = M.index.astype(str).tolist()
-    labels2 = [l.split("::")[-1] for l in labels]
-    a=1
-
+    labels = [l.split("::")[-1] for l in M.index.astype(str).tolist()]
     dendrogram(
         Z,
-        labels=labels2,
+        labels=labels,
         leaf_rotation=90,
         leaf_font_size=6 if n > 80 else 7,
         ax=ax,
@@ -446,32 +289,113 @@ def _plot_centroid_dendrogram(
     ax.set_title(title, fontsize=12)
     ax.set_ylabel("Distance = 1 - centroid cosine", fontsize=10)
     ax.set_xlabel("Deployments", fontsize=10)
-
     ax.grid(True, axis="y", alpha=0.25)
     ax.set_axisbelow(True)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.tick_params(axis="x", labelsize=6 if n > 80 else 7)
     ax.tick_params(axis="y", labelsize=9)
-
     _save(fig, out_path)
 
 
-def visualize_geometry_metrics(
+def _plot_offdiag_hist(M: pd.DataFrame, out_path: Path, bins: int = 30):
+    A = M.astype(float).values
+    vals = A[~np.eye(A.shape[0], dtype=bool)] if A.shape[0] >= 2 else np.array([], dtype=float)
+    fig = plt.figure(figsize=(6.8, 4.8))
+    ax = fig.add_subplot(111)
+    ax.hist(vals, bins=bins, alpha=0.9)
+    ax.set_title("Distribution of centroid cosine between deployments", fontsize=12)
+    ax.set_xlabel("centroid cosine (off-diagonal)", fontsize=10)
+    ax.set_ylabel("Count", fontsize=10)
+    _set_pretty_axes(ax)
+    _save(fig, out_path)
+
+
+def _make_exp_shannon(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "exp_shannon" not in out.columns and "shannon" in out.columns:
+        out["exp_shannon"] = np.exp(pd.to_numeric(out["shannon"], errors="coerce"))
+    return out
+
+
+def _plot_all_timeseries_together(df: pd.DataFrame, out_path: Path, rolling: int = 7):
+    df = _make_exp_shannon(df)
+    metrics = [
+        ("centroid_norm", "Centroid norm\n(homogeneity ↑)"),
+        ("mean_centroid_cosine_to_others", "Mean centroid cosine\nto others ↑"),
+        ("shannon", "Shannon entropy\n(alpha diversity ↑)"),
+        ("exp_shannon", "exp(Shannon)\n(effective #classes ↑)"),
+        ("cos_p10", "Cosine p10\n(diversity tail ↓)"),
+        ("pair_cos_p50", "Pairwise cosine p50\n(repetitiveness ↑)"),
+        ("eff_rank", "Effective rank\n(complexity ↑)"),
+        ("pca_dim_90", "PCA dim 90%\n(complexity ↑)"),
+    ]
+    metrics = [(c, y) for c, y in metrics if c in df.columns]
+    if not metrics:
+        return
+
+    x = np.arange(len(df), dtype=int)
+    fig, axes = plt.subplots(
+        nrows=len(metrics), ncols=1, figsize=(12, 1.55 * len(metrics) + 2.0),
+        sharex=True, constrained_layout=True,
+    )
+    if len(metrics) == 1:
+        axes = [axes]
+
+    for ax, (col, ylabel) in zip(axes, metrics):
+        y = pd.to_numeric(df[col], errors="coerce").values
+        ax.plot(x, y, marker="o", markersize=2.4, linewidth=1.1, alpha=0.9)
+        if rolling and rolling >= 3 and len(y) >= rolling:
+            roll = pd.Series(y).rolling(rolling, center=True, min_periods=max(3, rolling // 3)).mean().values
+            ax.plot(x, roll, linewidth=2.0, alpha=0.9)
+        _set_pretty_axes(ax)
+        ax.set_ylabel(ylabel, fontsize=9)
+
+    axes[-1].set_xlabel("Deployment index (ordered)", fontsize=10)
+    fig.suptitle("Representation geometry + label diversity across deployments", fontsize=13)
+    _save(fig, out_path)
+
+
+def _plot_zscore_heatmap(df: pd.DataFrame, cols: list[str], out_path: Path, title: str):
+    cols = [c for c in cols if c in df.columns]
+    if not cols:
+        return
+
+    Z = pd.DataFrame(index=df.index)
+    for c in cols:
+        v = pd.to_numeric(df[c], errors="coerce")
+        Z[c] = (v - v.mean()) / (v.std(ddof=0) + 1e-12)
+
+    data = Z.T.values
+    fig, ax = plt.subplots(figsize=(12, max(2.6, 0.55 * len(cols) + 0.8)))
+    im = ax.imshow(data, aspect="auto")
+    ax.set_yticks(range(len(cols)))
+    ax.set_yticklabels(cols, fontsize=9)
+
+    tick_idx = np.unique(np.linspace(0, max(0, Z.shape[0] - 1), min(10, max(1, Z.shape[0]))).astype(int))
+    ax.set_xticks(tick_idx)
+    ax.set_xticklabels(tick_idx, fontsize=9)
+    ax.set_title(title)
+    ax.set_xlabel("Deployment index (ordered)")
+    ax.set_ylabel("Metric (z-score)")
+    cbar = plt.colorbar(im, ax=ax, fraction=0.04, pad=0.02)
+    cbar.set_label("z-score")
+    plt.tight_layout()
+    fig.savefig(out_path.with_suffix(".png"), dpi=220, bbox_inches="tight")
+    fig.savefig(out_path.with_suffix(".pdf"), bbox_inches="tight")
+    plt.close(fig)
+
+
+def visualize_geometry_metrics_merged(
     metrics_csv: str | Path,
     out_dir: str | Path,
     run_id: str | None = None,
     rolling: int = 7,
     centroid_cosine_matrix_csv: str | Path | None = None,
+    keep_individual_timeseries: bool = True,
 ):
-    """
-    rolling: window for an optional rolling mean overlay on time-series plots.
-
-    centroid_cosine_matrix_csv:
-        Optional path to centroid_cosine_matrix.csv produced by your geometry summary code.
-    """
     metrics_csv = Path(metrics_csv)
-    out_dir = Path(out_dir) / "geometry_viz"
+    out_dir = Path(out_dir) / "geometry_viz_merged"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     df = pd.read_csv(metrics_csv, sep=None, engine="python")
@@ -479,235 +403,108 @@ def visualize_geometry_metrics(
         df = df[df["run_id"] == run_id].copy()
 
     df = _maybe_add_dt(df)
+    df = _make_exp_shannon(df)
 
-    # -----------------------------------------
-    # NEW: attach between-group centroid metric
-    # -----------------------------------------
     M = None
     if centroid_cosine_matrix_csv is not None:
         centroid_cosine_matrix_csv = Path(centroid_cosine_matrix_csv)
         if centroid_cosine_matrix_csv.exists():
             M = _read_centroid_cosine_matrix(centroid_cosine_matrix_csv)
-
             if run_id is not None:
                 keep_mask = [idx.startswith(f"{run_id}::") for idx in M.index]
                 keep = M.index[np.array(keep_mask)]
                 M = M.loc[keep, keep]
-
             df = _attach_centroid_cosine_summary(df, M)
 
-            # save augmented metrics
-            df.to_csv(out_dir / "geometry_metrics_used.csv", index=False)
-
-            # matrix visualizations
-            _plot_matrix_heatmap(
-                M,
-                out_dir / "heatmap_centroid_cosine_matrix",
-                title="Centroid cosine similarity between deployments",
-            )
-
+            # keep only non-redundant matrix summaries
             _plot_clustered_centroid_heatmap(
                 M,
                 out_dir / "heatmap_centroid_cosine_matrix_clustered",
                 title="Clustered centroid cosine similarity between deployments",
-                method="average",   # can try: "complete", "ward" not ideal here, "single"
+                method="average",
             )
-
             _plot_centroid_dendrogram(
                 M,
                 out_dir / "dendrogram_centroid_cosine",
                 title="Hierarchical clustering of deployments by centroid direction",
                 method="average",
             )
+            _plot_offdiag_hist(M, out_dir / "hist_centroid_cosine_offdiag", bins=32)
 
-            _plot_offdiag_hist(
-                M,
-                out_dir / "hist_centroid_cosine_offdiag",
-                bins=32,
-            )
-        else:
-            df.to_csv(out_dir / "geometry_metrics_used.csv", index=False)
-    else:
-        df.to_csv(out_dir / "geometry_metrics_used.csv", index=False)
+    df.to_csv(out_dir / "geometry_metrics_used.csv", index=False)
 
-    # ---- Time series (ordered deployments)
-    _plot_series(
-        df, "centroid_norm",
-        out_dir / "ts_centroid_norm",
-        title="Centroid norm across deployments (higher = more concentrated / homogeneous)",
-        ylabel="centroid_norm",
-        add_rolling=rolling,
-        annotate=True,
-    )
+    # One main combined summary plot instead of separate duplicated comparison figures
+    _plot_all_timeseries_together(df, out_dir / "ts_all_metrics_combined", rolling=rolling)
 
-    if "mean_centroid_cosine_to_others" in df.columns:
-        _plot_series(
-            df, "mean_centroid_cosine_to_others",
-            out_dir / "ts_mean_centroid_cosine_to_others",
-            title="Mean centroid cosine to other deployments (higher = more directionally typical)",
-            ylabel="mean_centroid_cosine_to_others",
-            add_rolling=rolling,
-            annotate=True,
-        )
+    if keep_individual_timeseries:
+        core_ts = [
+            ("centroid_norm", "Centroid norm across deployments", "centroid_norm"),
+            ("shannon", "Shannon entropy across deployments", "shannon"),
+            ("exp_shannon", "exp(Shannon) across deployments", "exp_shannon"),
+            ("cos_p10", "Cosine-to-centroid p10 across deployments", "cos_p10"),
+            ("pair_cos_p50", "Median pairwise cosine similarity across deployments", "pair_cos_p50"),
+            ("eff_rank", "Effective rank across deployments", "eff_rank"),
+            ("mean_centroid_cosine_to_others", "Mean centroid cosine to other deployments", "mean_centroid_cosine_to_others"),
+        ]
+        for col, title, ylabel in core_ts:
+            if col in df.columns:
+                _plot_series(
+                    df, col, out_dir / f"ts_{col}",
+                    title=title,
+                    ylabel=ylabel,
+                    add_rolling=rolling,
+                    annotate=True,
+                )
 
-    _plot_series(
-        df, "cos_p10",
-        out_dir / "ts_cos_p10",
-        title="Cosine-to-centroid p10 (lower = heavier tail / more diverse)",
-        ylabel="cos_p10",
-        add_rolling=rolling,
-        annotate=True,
-    )
-    _plot_series(
-        df, "cos_std",
-        out_dir / "ts_cos_std",
-        title="Cosine-to-centroid spread (std; higher = more variation)",
-        ylabel="cos_std",
-        add_rolling=rolling,
-        annotate=True,
-    )
-    _plot_series(
-        df, "pair_cos_p50",
-        out_dir / "ts_pair_cos_p50",
-        title="Median pairwise cosine similarity (higher = more repetitive within deployment)",
-        ylabel="pair_cos_p50",
-        add_rolling=rolling,
-        annotate=True,
-    )
-    _plot_series(
-        df, "eff_rank",
-        out_dir / "ts_eff_rank",
-        title="Effective rank (higher = more complex variability)",
-        ylabel="eff_rank",
-        add_rolling=rolling,
-        annotate=True,
-    )
-    _plot_series(
-        df, "pca_dim_90",
-        out_dir / "ts_pca_dim_90",
-        title="Intrinsic complexity proxy: #PCs for 90% variance",
-        ylabel="pca_dim_90",
-        add_rolling=rolling,
-        annotate=True,
-    )
-
-    # ---- Scatter relationships
-    if "trace_cov" in df.columns:
-        _plot_scatter(
-            df, "centroid_norm", "trace_cov",
-            out_dir / "sc_centroid_vs_trace",
-            title="Concentration vs spread (unit-sphere: should be inversely related)",
-            xlabel="centroid_norm",
-            ylabel="trace_cov",
-            annotate=True,
-        )
-
-    _plot_scatter(
-        df, "centroid_norm", "pair_cos_p50",
-        out_dir / "sc_centroid_vs_pair_p50",
-        title="Concentration vs repetitiveness",
-        xlabel="centroid_norm",
-        ylabel="pair_cos_p50",
-        annotate=True,
-    )
-    _plot_scatter(
-        df, "centroid_norm", "eff_rank",
-        out_dir / "sc_centroid_vs_effrank",
-        title="Concentration vs complexity",
-        xlabel="centroid_norm",
-        ylabel="eff_rank",
-        annotate=True,
-    )
-    _plot_scatter(
-        df, "pair_cos_p50", "eff_rank",
-        out_dir / "sc_pair_p50_vs_effrank",
-        title="Repetitiveness vs complexity",
-        xlabel="pair_cos_p50",
-        ylabel="eff_rank",
-        annotate=True,
-    )
-    _plot_scatter(
-        df, "centroid_norm", "cos_p10",
-        out_dir / "sc_centroid_vs_cos_p10",
-        title="Concentration vs diversity",
-        xlabel="centroid_norm",
-        ylabel="cos_p10",
-        annotate=True,
-    )
-
-    if "mean_centroid_cosine_to_others" in df.columns:
-        _plot_scatter(
-            df, "mean_centroid_cosine_to_others", "centroid_norm",
-            out_dir / "sc_mean_centroid_cosine_vs_centroid_norm",
-            title="Directional typicality vs concentration",
-            xlabel="mean_centroid_cosine_to_others",
-            ylabel="centroid_norm",
-            annotate=True,
-        )
-        _plot_scatter(
-            df, "mean_centroid_cosine_to_others", "eff_rank",
-            out_dir / "sc_mean_centroid_cosine_vs_effrank",
-            title="Directional typicality vs complexity",
-            xlabel="mean_centroid_cosine_to_others",
-            ylabel="eff_rank",
-            annotate=True,
-        )
-        _plot_scatter(
-            df, "mean_centroid_cosine_to_others", "pair_cos_p50",
-            out_dir / "sc_mean_centroid_cosine_vs_pair_p50",
-            title="Directional typicality vs repetitiveness",
-            xlabel="mean_centroid_cosine_to_others",
-            ylabel="pair_cos_p50",
-            annotate=True,
-        )
-
-    # ---- Histograms
-    _plot_hist(
-        df, "centroid_norm",
-        out_dir / "hist_centroid_norm",
-        title="Distribution of centroid_norm across deployments",
-        xlabel="centroid_norm",
-        bins=28,
-    )
-    _plot_hist(
-        df, "pair_cos_p50",
-        out_dir / "hist_pair_cos_p50",
-        title="Distribution of median pairwise cosine similarity",
-        xlabel="pair_cos_p50",
-        bins=28,
-    )
-    _plot_hist(
-        df, "eff_rank",
-        out_dir / "hist_eff_rank",
-        title="Distribution of effective rank across deployments",
-        xlabel="eff_rank",
-        bins=28,
-    )
-
-    if "mean_centroid_cosine_to_others" in df.columns:
-        _plot_hist(
-            df, "mean_centroid_cosine_to_others",
-            out_dir / "hist_mean_centroid_cosine_to_others",
-            title="Distribution of mean centroid cosine to others",
-            xlabel="mean_centroid_cosine_to_others",
-            bins=28,
-        )
-
-    plot_all_timeseries_together(
+    # Keep a single compact comparison heatmap instead of both rank overlay and z-score overlay
+    _plot_zscore_heatmap(
         df,
-        out_dir / "ts_all_metrics",
-        rolling=rolling,
+        cols=["centroid_norm", "shannon", "exp_shannon", "cos_p10", "pair_cos_p50", "eff_rank"],
+        out_path=out_dir / "heatmap_metric_zscores",
+        title="Metric comparison heatmap across deployments",
     )
+
+    # Selected non-redundant scatters
+    scatters = [
+        ("centroid_norm", "shannon", "sc_centroid_vs_shannon", "Concentration vs Shannon diversity"),
+        ("centroid_norm", "exp_shannon", "sc_centroid_vs_exp_shannon", "Concentration vs effective diversity"),
+        ("centroid_norm", "eff_rank", "sc_centroid_vs_effrank", "Concentration vs complexity"),
+        ("centroid_norm", "cos_p10", "sc_centroid_vs_cos_p10", "Concentration vs diversity tail"),
+        ("pair_cos_p50", "eff_rank", "sc_pair_p50_vs_effrank", "Repetitiveness vs complexity"),
+    ]
+    if "mean_centroid_cosine_to_others" in df.columns:
+        scatters.append(
+            ("mean_centroid_cosine_to_others", "eff_rank", "sc_mean_centroid_cosine_vs_effrank", "Directional typicality vs complexity")
+        )
+
+    for xcol, ycol, stem, title in scatters:
+        _plot_scatter(
+            df, xcol, ycol, out_dir / stem,
+            title=title,
+            xlabel=xcol,
+            ylabel=ycol,
+            annotate=True,
+        )
+
+    # Core histograms only
+    for col in ["centroid_norm", "shannon", "exp_shannon", "pair_cos_p50", "eff_rank"]:
+        if col in df.columns:
+            _plot_hist(
+                df, col, out_dir / f"hist_{col}",
+                title=f"Distribution of {col} across deployments",
+                xlabel=col,
+                bins=28,
+            )
+
+    print(f"Saved merged plots to: {out_dir}")
 
 
 if __name__ == "__main__":
-    visualize_geometry_metrics(
-        # metrics_csv=r"C:\alr4\analysis\geometry_all\geometry_metrics.csv",
+    visualize_geometry_metrics_merged(
         metrics_csv=r"C:\alr4\analysis\geometry_partitrics\geometry_metrics.csv",
-        # out_dir=r"C:\alr4\analysis\geometry_all",
         out_dir=r"C:\alr4\analysis\geometry_partitrics",
         run_id=None,
         rolling=7,
-        # centroid_cosine_matrix_csv=r"C:\alr4\analysis\geometry_all\centroid_cosine_matrix.csv",
         centroid_cosine_matrix_csv=r"C:\alr4\analysis\geometry_partitrics\centroid_cosine_matrix.csv",
+        keep_individual_timeseries=True,
     )
