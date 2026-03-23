@@ -22,6 +22,41 @@ def _intrinsic_dim_pca(X: np.ndarray, thresholds=(0.90, 0.95)) -> Tuple[int, int
     return idx90, idx95
 
 
+def _shannon_from_labels(labels: np.ndarray) -> Tuple[float, float, int]:
+    labels = np.asarray(labels, dtype=object)
+    labels = labels[pd.notna(labels)]
+    if labels.size == 0:
+        return float("nan"), float("nan"), 0
+
+    _, counts = np.unique(labels, return_counts=True)
+    p = counts / counts.sum()
+    p = p[p > 0]
+
+    H = float(-(p * np.log(p)).sum())
+    exp_H = float(np.exp(H))
+    return H, exp_H, int(len(counts))
+
+
+def _find_predictions_csv(features_path: str | Path) -> Path:
+    """
+    Assumes predictions_with_top3_scores.csv lives next to the feature file,
+    or one level above if needed.
+    """
+    features_path = Path(features_path)
+
+    candidates = [
+        features_path.parent / "predictions_with_top3_scores.csv",
+        features_path.parent.parent / "predictions_with_top3_scores.csv",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+
+    raise FileNotFoundError(
+        f"Could not find predictions_with_top3_scores.csv near {features_path}"
+    )
+
+
 def run_geometry_summary(
     parent_dir: str,
     out_dir: str,
@@ -29,20 +64,18 @@ def run_geometry_summary(
     group_col: str = "sample_id",     # used when group_mode == "meta"
     sample_per_group: int = 2000,
     seed: int = 42,
-    pair_samples: int = 5000,         # how many random within-group pairs for pairwise cosine stats
+    pair_samples: int = 5000,
+    pred_label_col: str = "Top-1 Predicted Label",
 ) -> pd.DataFrame:
     """
     Geometry + sphere-aware summary of feature space per group (run or profile/meta).
 
-    Additional output:
+    Additional outputs:
         - centroid cosine similarity between groups
-          (captures whether two groups live in similar directions/regions
-           of embedding space, not just whether their internal structure is similar)
+        - prediction-label Shannon entropy from predictions_with_top3_scores.csv
 
-    Saves:
-        - geometry/geometry_metrics.csv
-        - geometry/centroid_cosine_matrix.csv
-        - geometry/centroid_cosine_pairs.csv
+    Assumption:
+        predictions_with_top3_scores.csv row order matches feature row order.
     """
     rng = np.random.default_rng(seed)
 
@@ -60,8 +93,11 @@ def run_geometry_summary(
         )
 
     rows = []
-    centroid_dirs = []   # store unit centroid vectors for pairwise comparison
-    centroid_keys = []   # store identifiers aligned with centroid_dirs
+    centroid_dirs = []
+    centroid_keys = []
+
+    # optional cache so each run CSV is only loaded once
+    pred_cache: dict[str, pd.DataFrame] = {}
 
     for _, g in groups.iterrows():
         run_id = g["run_id"]
@@ -90,7 +126,32 @@ def run_geometry_summary(
         if num_rows == 0:
             continue
 
-        # Sample within this group
+        # -----------------------
+        # Prediction-label Shannon
+        # -----------------------
+        if run_id not in pred_cache:
+            pred_csv = _find_predictions_csv(features_path)
+            pred_df = pd.read_csv(pred_csv)
+            if pred_label_col not in pred_df.columns:
+                raise KeyError(
+                    f"Column '{pred_label_col}' not found in {pred_csv}"
+                )
+            pred_cache[run_id] = pred_df
+
+        pred_df = pred_cache[run_id]
+
+        if len(pred_df) < int(idx_all.max()) + 1:
+            raise ValueError(
+                f"Prediction CSV for run {run_id} has fewer rows ({len(pred_df)}) "
+                f"than needed for max feature index {int(idx_all.max())}."
+            )
+
+        labels_all = pred_df.iloc[idx_all][pred_label_col].to_numpy()
+        pred_shannon, pred_exp_shannon, pred_num_classes_present = _shannon_from_labels(labels_all)
+
+        # -----------------------
+        # Sample within this group for geometry
+        # -----------------------
         k = min(sample_per_group, num_rows)
         if k <= 0:
             continue
@@ -124,18 +185,16 @@ def run_geometry_summary(
 
         if mu_norm > 0:
             mu_hat = mu / mu_norm
-            cos_to_centroid = X @ mu_hat  # if X rows are unit, this is cosine similarity
+            cos_to_centroid = X @ mu_hat
             cos_mean = float(cos_to_centroid.mean())
             cos_std = float(cos_to_centroid.std())
             cos_p10 = float(np.percentile(cos_to_centroid, 10))
             cos_p50 = float(np.percentile(cos_to_centroid, 50))
             cos_p90 = float(np.percentile(cos_to_centroid, 90))
 
-            # save centroid direction for between-group comparison
             centroid_dirs.append(mu_hat.astype(np.float32))
             centroid_keys.append((run_id, group_id))
         else:
-            mu_hat = None
             cos_mean = cos_std = cos_p10 = cos_p50 = cos_p90 = float("nan")
 
         # --------------------------------------------
@@ -185,6 +244,10 @@ def run_geometry_summary(
                 "feat_dim": d,
                 "sampled": n,
 
+                "pred_num_classes_present": int(pred_num_classes_present),
+                "pred_shannon": round(pred_shannon, 6) if np.isfinite(pred_shannon) else pred_shannon,
+                "pred_exp_shannon": round(pred_exp_shannon, 6) if np.isfinite(pred_exp_shannon) else pred_exp_shannon,
+
                 "mean_norm": round(mean_norm, 6),
                 "std_norm": round(std_norm, 6),
 
@@ -217,8 +280,8 @@ def run_geometry_summary(
     # pairwise centroid cosine similarity by group
     # -------------------------------------------------
     if len(centroid_dirs) > 0:
-        U = np.stack(centroid_dirs, axis=0)  # shape: (G, D)
-        sim = U @ U.T                        # cosine similarity because rows are unit vectors
+        U = np.stack(centroid_dirs, axis=0)
+        sim = U @ U.T
 
         labels = [f"{run_id}::{group_id}" for run_id, group_id in centroid_keys]
         sim_df = pd.DataFrame(sim, index=labels, columns=labels)
