@@ -245,8 +245,8 @@ def run_geometry_summary(
                 "sampled": n,
 
                 "pred_num_classes_present": int(pred_num_classes_present),
-                "pred_shannon": round(pred_shannon, 6) if np.isfinite(pred_shannon) else pred_shannon,
-                "pred_exp_shannon": round(pred_exp_shannon, 6) if np.isfinite(pred_exp_shannon) else pred_exp_shannon,
+                "shannon": round(pred_shannon, 6) if np.isfinite(pred_shannon) else pred_shannon,
+                "exp_shannon": round(pred_exp_shannon, 6) if np.isfinite(pred_exp_shannon) else pred_exp_shannon,
 
                 "mean_norm": round(mean_norm, 6),
                 "std_norm": round(std_norm, 6),

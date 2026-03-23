@@ -20,7 +20,6 @@ def _set_pretty_axes(ax: plt.Axes):
 
 def plot_all_timeseries_together_with_shannon(
     metrics_df: pd.DataFrame,
-    shannon_csv: str | Path,
     out_path: str | Path,
     rolling: int = 7,
     shannon_join_col: str = "group_id",   # change to "run_id" if your shannon table is per-run
@@ -35,37 +34,35 @@ def plot_all_timeseries_together_with_shannon(
     """
 
     out_path = Path(out_path)
-    shannon_csv = Path(shannon_csv)
 
     # ---- read shannon table
-    sh = pd.read_csv(shannon_csv, sep=None, engine="python")
+    # sh = pd.read_csv(shannon_csv, sep=None, engine="python")
 
     if shannon_join_col not in metrics_df.columns:
         raise ValueError(f"metrics_df missing join column '{shannon_join_col}'. Available: {list(metrics_df.columns)}")
-    if shannon_join_col not in sh.columns:
-        raise ValueError(f"shannon table missing join column '{shannon_join_col}'. Available: {list(sh.columns)}")
 
     # ---- merge shannon into metrics, preserving the existing order of metrics_df
-    df = metrics_df.merge(
-        sh[[shannon_join_col] + [c for c in ["Shannon", "Effective_species"] if c in sh.columns]],
-        on=shannon_join_col,
-        how="left",
-        validate="one_to_one" if sh[shannon_join_col].is_unique else "many_to_one",
-    )
+    # df = metrics_df.merge(
+    #     sh[[shannon_join_col] + [c for c in ["Shannon", "Effective_species"] if c in sh.columns]],
+    #     on=shannon_join_col,
+    #     how="left",
+    #     validate="one_to_one" if sh[shannon_join_col].is_unique else "many_to_one",
+    # )
     # exp(Shannon) (effective number of classes)
-    df["Shannon_eff"] = np.exp(pd.to_numeric(df["Shannon"], errors="coerce"))
+    df = metrics_df.copy()
+    # df["Shannon_eff"] = np.exp(pd.to_numeric(df["Shannon"], errors="coerce"))
 
     # ---- metrics to plot (add Shannon)
     metrics = [
         ("centroid_norm", "Centroid norm\n(homogeneity ↑)"),
-        ("Shannon", "Shannon entropy\n(alpha diversity ↑)"),
+        ("shannon", "Shannon entropy\n(alpha diversity ↑)"),
         # ("cos_p10", "Cosine p10\n(diversity ↑ ↓)"),
         # ("pair_cos_p50", "Pairwise cosine p50\n(repetitiveness ↑)"),
         ("eff_rank", "Effective rank\n(complexity ↑)"),
         # ("pca_dim_90", "PCA dim 90%\n(complexity ↑)"),
     ]
 
-    metrics.append(("Shannon_eff", "exp(Shannon)\n(effective #classes ↑)"))
+    metrics.append(("exp_shannon", "exp(Shannon)\n(effective #classes ↑)"))
 
     # Optionally add effective species if present
     # if "Effective_species" in df.columns:
@@ -315,7 +312,7 @@ def compare_three_metrics_visually(
 
     if metrics is None:
         metrics = [
-            ("Shannon", "Shannon entropy"),
+            ("shannon", "Shannon entropy"),
             ("centroid_norm", "Centroid norm"),
             ("eff_rank", "Effective rank"),
         ]
@@ -343,14 +340,14 @@ def compare_three_metrics_visually(
 
     # 3) scatters (pairwise relationships)
     scatter_with_smart_labels(
-        df, "centroid_norm", "Shannon",
+        df, "centroid_norm", "shannon",
         out_dir / "sc_shannon_vs_centroid.png",
         # title="Shannon vs centroid_norm (labels: outliers + every 25th)",
         title="Concentration vs Balance",
         id_col=id_col,
     )
     scatter_with_smart_labels(
-        df, "eff_rank", "Shannon",
+        df, "eff_rank", "shannon",
         out_dir / "sc_shannon_vs_effrank.png",
         title="Shannon vs eff_rank",
         id_col=id_col,
@@ -371,14 +368,14 @@ def compare_three_metrics_visually(
 
     # exp(Shannon) scatters
     scatter_with_smart_labels(
-        df, "centroid_norm", "Shannon_eff",
+        df, "centroid_norm", "exp_shannon",
         out_dir / "sc_expShannon_vs_centroid.png",
         title="Concentration vs Effective diversity (exp(Shannon))",
         id_col=id_col,
     )
 
     scatter_with_smart_labels(
-        df, "eff_rank", "Shannon_eff",
+        df, "eff_rank", "exp_shannon",
         out_dir / "sc_expShannon_vs_effrank.png",
         title="Complexity vs Effective diversity (exp(Shannon))",
         id_col=id_col,
@@ -387,12 +384,12 @@ def compare_three_metrics_visually(
     print(f"Saved plots to: {out_dir}")
 
 
-path = r'C:\alr4\analysis\geometry_all'
+# path = r'C:\alr4\analysis\geometry_all'
+path = r'C:\alr4\analysis\geometry'
 df_metrics = pd.read_csv(path + r"\geometry_metrics.csv", sep=None, engine="python")
 # keep order as-is (as you mentioned you already do)
 df_merged = plot_all_timeseries_together_with_shannon(
     metrics_df=df_metrics,
-    shannon_csv=r"C:\alr4\ai_predict_all\prediction_parti20260119121141\ALR4_shannon_table.csv",
     out_path=path + r"\geometry_viz\ts_all_metrics_plus_shannon",
     rolling=7,
     shannon_join_col="group_id",   # change to "run_id" if needed
