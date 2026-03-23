@@ -212,12 +212,13 @@ def _plot_matrix_heatmap(
     cbar.set_label("centroid cosine", fontsize=10)
 
     ax.set_title(title, fontsize=12)
+    labels = [l.split("::")[-1] for l in M.index]
 
-    if n <= 60:
+    if n <= 200:
         ax.set_xticks(np.arange(n))
         ax.set_yticks(np.arange(n))
-        ax.set_xticklabels(M.columns.tolist(), rotation=90, fontsize=7)
-        ax.set_yticklabels(M.index.tolist(), fontsize=7)
+        ax.set_xticklabels(labels, rotation=90, fontsize=7)
+        ax.set_yticklabels(labels, fontsize=7)
     else:
         ax.set_xticks([])
         ax.set_yticks([])
@@ -430,19 +431,28 @@ def _plot_centroid_dendrogram(
     fig = plt.figure(figsize=(fig_w, fig_h))
     ax = fig.add_subplot(111)
 
+    labels = M.index.astype(str).tolist()
+    labels2 = [l.split("::")[-1] for l in labels]
+    a=1
+
     dendrogram(
         Z,
-        labels=M.index.astype(str).tolist(),
+        labels=labels2,
         leaf_rotation=90,
         leaf_font_size=6 if n > 80 else 7,
         ax=ax,
         color_threshold=None,
     )
-
     ax.set_title(title, fontsize=12)
     ax.set_ylabel("Distance = 1 - centroid cosine", fontsize=10)
     ax.set_xlabel("Deployments", fontsize=10)
-    _set_pretty_axes(ax)
+
+    ax.grid(True, axis="y", alpha=0.25)
+    ax.set_axisbelow(True)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(axis="x", labelsize=6 if n > 80 else 7)
+    ax.tick_params(axis="y", labelsize=9)
 
     _save(fig, out_path)
 
@@ -692,9 +702,12 @@ def visualize_geometry_metrics(
 
 if __name__ == "__main__":
     visualize_geometry_metrics(
-        metrics_csv=r"C:\alr4\analysis\geometry_all\geometry_metrics.csv",
-        out_dir=r"C:\alr4\analysis\geometry_all",
+        # metrics_csv=r"C:\alr4\analysis\geometry_all\geometry_metrics.csv",
+        metrics_csv=r"C:\alr4\analysis\geometry_partitrics\geometry_metrics.csv",
+        # out_dir=r"C:\alr4\analysis\geometry_all",
+        out_dir=r"C:\alr4\analysis\geometry_partitrics",
         run_id=None,
         rolling=7,
-        centroid_cosine_matrix_csv=r"C:\alr4\analysis\geometry_all\centroid_cosine_matrix.csv",
+        # centroid_cosine_matrix_csv=r"C:\alr4\analysis\geometry_all\centroid_cosine_matrix.csv",
+        centroid_cosine_matrix_csv=r"C:\alr4\analysis\geometry_partitrics\centroid_cosine_matrix.csv",
     )
