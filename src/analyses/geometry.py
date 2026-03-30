@@ -66,6 +66,7 @@ def run_geometry_summary(
     seed: int = 42,
     pair_samples: int = 5000,
     pred_label_col: str = "Top-1 Predicted Label", # 'Top-1 Predicted Label' or 'object_annotation_category' which is Amanda prediction
+    exclude_labels: list[str] | set[str] | None = None,
 ) -> pd.DataFrame:
     """
     Geometry + sphere-aware summary of feature space per group (run or profile/meta).
@@ -78,6 +79,7 @@ def run_geometry_summary(
         predictions_with_top3_scores.csv row order matches feature row order.
     """
     rng = np.random.default_rng(seed)
+    exclude_labels = set(exclude_labels or [])
 
     out_root = Path(out_dir) / "geometry"
     out_root.mkdir(parents=True, exist_ok=True)
@@ -122,10 +124,6 @@ def run_geometry_summary(
             with open_h5(features_path) as h5f:
                 n_total, d = get_h5_shapes(h5f)
 
-        num_rows = int(idx_all.size)
-        if num_rows == 0:
-            continue
-
         # -----------------------
         # Prediction-label Shannon
         # -----------------------
@@ -146,11 +144,27 @@ def run_geometry_summary(
                 f"than needed for max feature index {int(idx_all.max())}."
             )
 
-        labels_all = pred_df.iloc[idx_all][pred_label_col].to_numpy()
-        pred_shannon, pred_exp_shannon, pred_num_classes_present = _shannon_from_labels(labels_all)
+        # -----------------------
+        # FILTER INDICES HERE
+        # -----------------------
+        labels_full = pred_df.iloc[idx_all][pred_label_col].to_numpy()
+
+        if exclude_labels:
+            keep_mask = ~pd.Series(labels_full).isin(exclude_labels).to_numpy()
+            idx_all = idx_all[keep_mask]
+            labels_full = labels_full[keep_mask]
+
+        num_rows = int(idx_all.size)
+        if num_rows == 0:
+            continue
 
         # -----------------------
-        # Sample within this group for geometry
+        # Shannon on filtered set
+        # -----------------------
+        pred_shannon, pred_exp_shannon, pred_num_classes_present = _shannon_from_labels(labels_full)
+
+        # -----------------------
+        # Sample filtered rows for geometry
         # -----------------------
         k = min(sample_per_group, num_rows)
         if k <= 0:
