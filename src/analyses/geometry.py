@@ -65,7 +65,7 @@ def run_geometry_summary(
     sample_per_group: int = 2000,
     seed: int = 42,
     pair_samples: int = 5000,
-    pred_label_col: str = "Top-1 Predicted Label",
+    pred_label_col: str = "Top-1 Predicted Label", # 'Top-1 Predicted Label' or 'object_annotation_category' which is Amanda prediction
 ) -> pd.DataFrame:
     """
     Geometry + sphere-aware summary of feature space per group (run or profile/meta).
