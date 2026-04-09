@@ -14,6 +14,31 @@ _gid_re = re.compile(
 )
 
 
+def _shorten_sample_id(raw: str) -> str:
+    """
+    Shorten long sample_id strings by keeping only the 3rd chunk.
+
+    Example:
+      'alr004_20251001_0012_0001_d0001' -> '0012'
+
+    Logic:
+      - split on '_' (after str() conversion)
+      - if there are at least 3 chunks, return chunks[2]
+      - otherwise return the original string
+    """
+    if raw is None:
+        return ""
+    s = str(raw)
+    parts = s.split("_")
+    if len(parts) >= 3:
+        val = parts[2]
+        try:
+            return f"{int(val):04d}"  # enforce 4-digit zero padding
+        except ValueError:
+            return val  # fallback if not numeric
+    return s
+
+
 def _maybe_add_dt(df: pd.DataFrame) -> pd.DataFrame:
     if "dt" in df.columns:
         return df
@@ -190,8 +215,17 @@ def _compute_mean_centroid_cosine_to_others(M: pd.DataFrame) -> pd.Series:
 
 
 def _attach_centroid_cosine_summary(df: pd.DataFrame, M: pd.DataFrame) -> pd.DataFrame:
+    def _format_group_id(val):
+        try:
+            return f"{int(val):04d}"
+        except (ValueError, TypeError):
+            return str(val)
     out = df.copy()
-    out["group_key"] = out["run_id"].astype(str) + "::" + out["group_id"].astype(str)
+    out["group_key"] = (
+            out["run_id"].astype(str)
+            + "::"
+            + out["group_id"].map(_format_group_id)
+    )
     mean_sim = _compute_mean_centroid_cosine_to_others(M)
     return out.merge(
         mean_sim.rename("mean_centroid_cosine_to_others"),
@@ -322,19 +356,20 @@ def _plot_all_timeseries_together(df: pd.DataFrame, out_path: Path, rolling: int
     df = _make_exp_shannon(df)
     metrics = [
         ("centroid_norm", "Centroid norm\n(homogeneity ↑)"),
-        ("mean_centroid_cosine_to_others", "Mean centroid cosine\nto others ↑"),
-        ("shannon", "Shannon entropy\n(alpha diversity ↑)"),
-        ("exp_shannon", "exp(Shannon)\n(effective #classes ↑)"),
-        ("cos_p10", "Cosine p10\n(diversity tail ↓)"),
-        ("pair_cos_p50", "Pairwise cosine p50\n(repetitiveness ↑)"),
         ("eff_rank", "Effective rank\n(complexity ↑)"),
-        ("pca_dim_90", "PCA dim 90%\n(complexity ↑)"),
+        # ("exp_shannon", "exp(Shannon)\n(effective #classes ↑)"),
+        ("cos_p10", "Cosine p10\n(diversity tail ↓)"),
+        ("mean_centroid_cosine_to_others", "Mean centroid cosine\nto others ↑"),
+        # ("pair_cos_p50", "Pairwise cosine p50\n(repetitiveness ↑)"),
+        # ("shannon", "Shannon entropy\n(alpha diversity ↑)"),
+        # ("pca_dim_90", "PCA dim 90%\n(complexity ↑)"),
     ]
     metrics = [(c, y) for c, y in metrics if c in df.columns]
     if not metrics:
         return
 
     x = np.arange(len(df), dtype=int)
+    # x = df['group_id'].astype(str).tolist()
     fig, axes = plt.subplots(
         nrows=len(metrics), ncols=1, figsize=(12, 1.55 * len(metrics) + 2.0),
         sharex=True, constrained_layout=True,
@@ -351,8 +386,11 @@ def _plot_all_timeseries_together(df: pd.DataFrame, out_path: Path, rolling: int
         _set_pretty_axes(ax)
         ax.set_ylabel(ylabel, fontsize=9)
 
-    axes[-1].set_xlabel("Deployment index (ordered)", fontsize=10)
-    fig.suptitle("Representation geometry + label diversity across deployments", fontsize=13)
+    step = 5  # or 20 depending on density
+    axes[-1].set_xticks(range(0, len(x), step))
+    axes[-1].set_xticklabels(x[::step], rotation=90)
+    axes[-1].set_xlabel("Deployment index", fontsize=10)
+    fig.suptitle("Representation geometry", fontsize=13)
     _save(fig, out_path)
 
 
@@ -529,11 +567,14 @@ def visualize_geometry_metrics_merged(
 
 
 if __name__ == "__main__":
+    # path = r'C:\alr4\analysis\partitrics\uvp6net\geometry'
+    # path = r'C:\alr4\analysis\geometry'
+    path = r'C:\alr4\analysis\geometry_all'
     visualize_geometry_metrics_merged(
-        metrics_csv=r"C:\alr4\analysis\geometry_partitrics\geometry_metrics.csv",
-        out_dir=r"C:\alr4\analysis\geometry_partitrics",
+        metrics_csv=path + r"\geometry_metrics.csv",
+        out_dir=path,
         run_id=None,
-        rolling=7,
-        centroid_cosine_matrix_csv=r"C:\alr4\analysis\geometry_partitrics\centroid_cosine_matrix.csv",
+        rolling=4,
+        centroid_cosine_matrix_csv=path + r"\centroid_cosine_matrix.csv",
         keep_individual_timeseries=True,
     )
