@@ -20,11 +20,6 @@ def _shorten_sample_id(raw: str) -> str:
 
     Example:
       'alr004_20251001_0012_0001_d0001' -> '0012'
-
-    Logic:
-      - split on '_' (after str() conversion)
-      - if there are at least 3 chunks, return chunks[2]
-      - otherwise return the original string
     """
     if raw is None:
         return ""
@@ -33,10 +28,23 @@ def _shorten_sample_id(raw: str) -> str:
     if len(parts) >= 3:
         val = parts[2]
         try:
-            return f"{int(val):04d}"  # enforce 4-digit zero padding
+            return f"{int(val):04d}"
         except ValueError:
-            return val  # fallback if not numeric
+            return val
     return s
+
+
+def _with_group_id_short(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "group_id" in out.columns and "group_id_short" not in out.columns:
+        out["group_id_short"] = out["group_id"].map(_shorten_sample_id)
+    return out
+
+
+def _get_label_col(df: pd.DataFrame, use_group_id_short: bool = False) -> str:
+    if use_group_id_short and "group_id_short" in df.columns:
+        return "group_id_short"
+    return "group_id"
 
 
 def _maybe_add_dt(df: pd.DataFrame) -> pd.DataFrame:
@@ -102,13 +110,15 @@ def _plot_series(
     ylabel: str,
     add_rolling: int = 0,
     annotate: bool = True,
+    use_group_id_short: bool = False,
 ):
     if col not in df.columns:
         return
 
     x = np.arange(len(df), dtype=int)
     y = pd.to_numeric(df[col], errors="coerce").values
-    labels = df["group_id"].astype(str).tolist()
+    label_col = _get_label_col(df, use_group_id_short=use_group_id_short)
+    labels = df[label_col].astype(str).tolist()
 
     fig = plt.figure(figsize=(11.5, 4.2))
     ax = fig.add_subplot(111)
@@ -140,13 +150,19 @@ def _plot_scatter(
     ylabel: str,
     annotate: bool = True,
     id_col: str = "group_id",
+    use_group_id_short: bool = False,
 ):
     if xcol not in df.columns or ycol not in df.columns:
         return
 
     x = pd.to_numeric(df[xcol], errors="coerce").values
     y = pd.to_numeric(df[ycol], errors="coerce").values
-    labels = df[id_col].astype(str).tolist() if id_col in df.columns else [str(i) for i in range(len(df))]
+
+    label_col = id_col
+    if id_col == "group_id" and use_group_id_short and "group_id_short" in df.columns:
+        label_col = "group_id_short"
+
+    labels = df[label_col].astype(str).tolist() if label_col in df.columns else [str(i) for i in range(len(df))]
 
     if "sampled" in df.columns:
         s = pd.to_numeric(df["sampled"], errors="coerce").fillna(0.0).values
@@ -173,8 +189,10 @@ def _plot_scatter(
         good = np.isfinite(x) & np.isfinite(y)
         if good.any():
             idx = np.where(good)[0]
-            score = pd.Series(np.abs((x[good] - np.nanmean(x[good])) / (np.nanstd(x[good]) + 1e-12)) +
-                              np.abs((y[good] - np.nanmean(y[good])) / (np.nanstd(y[good]) + 1e-12))).values
+            score = pd.Series(
+                np.abs((x[good] - np.nanmean(x[good])) / (np.nanstd(x[good]) + 1e-12)) +
+                np.abs((y[good] - np.nanmean(y[good])) / (np.nanstd(y[good]) + 1e-12))
+            ).values
             pick = idx[np.argsort(score)[-6:]]
             for i in pick:
                 ax.annotate(labels[i], (x[i], y[i]), fontsize=8, xytext=(4, 4), textcoords="offset points")
@@ -215,16 +233,19 @@ def _compute_mean_centroid_cosine_to_others(M: pd.DataFrame) -> pd.Series:
 
 
 def _attach_centroid_cosine_summary(df: pd.DataFrame, M: pd.DataFrame) -> pd.DataFrame:
+    """
+    IMPORTANT:
+    Keep full group_id here for safe merging with centroid matrix.
+    Do NOT use group_id_short here, because it may not be unique.
+    """
     def _format_group_id(val):
-        try:
-            return f"{int(val):04d}"
-        except (ValueError, TypeError):
-            return str(val)
+        return str(val)
+
     out = df.copy()
     out["group_key"] = (
-            out["run_id"].astype(str)
-            + "::"
-            + out["group_id"].map(_format_group_id)
+        out["run_id"].astype(str)
+        + "::"
+        + out["group_id"].map(_format_group_id)
     )
     mean_sim = _compute_mean_centroid_cosine_to_others(M)
     return out.merge(
@@ -252,6 +273,7 @@ def _plot_clustered_centroid_heatmap(
     out_path: Path,
     title: str = "Clustered centroid cosine similarity between deployments",
     method: str = "average",
+    use_group_id_short: bool = False,
 ):
     A = M.astype(float).values.copy()
     n = A.shape[0]
@@ -263,7 +285,13 @@ def _plot_clustered_centroid_heatmap(
         M = M.iloc[order, order]
 
     A_ord = M.astype(float).values
-    labels = [l.split("::")[-1] for l in M.index.astype(str).tolist()]
+
+    raw_labels = [l.split("::")[-1] for l in M.index.astype(str).tolist()]
+    if use_group_id_short:
+        labels = [_shorten_sample_id(l) for l in raw_labels]
+    else:
+        labels = raw_labels
+
     fig_w = max(8, min(18, 0.28 * n + 5))
     fig_h = max(7, min(16, 0.28 * n + 4))
 
@@ -293,6 +321,7 @@ def _plot_centroid_dendrogram(
     out_path: Path,
     title: str = "Hierarchical clustering of deployments by centroid direction",
     method: str = "average",
+    use_group_id_short: bool = False,
 ):
     A = M.astype(float).values.copy()
     n = A.shape[0]
@@ -311,7 +340,9 @@ def _plot_centroid_dendrogram(
     fig = plt.figure(figsize=(fig_w, fig_h))
     ax = fig.add_subplot(111)
 
-    labels = [l.split("::")[-1] for l in M.index.astype(str).tolist()]
+    raw_labels = [l.split("::")[-1] for l in M.index.astype(str).tolist()]
+    labels = [_shorten_sample_id(l) for l in raw_labels] if use_group_id_short else raw_labels
+
     dendrogram(
         Z,
         labels=labels,
@@ -352,7 +383,13 @@ def _make_exp_shannon(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _plot_all_timeseries_together(df: pd.DataFrame, out_path: Path, rolling: int = 7):
+def _plot_all_timeseries_together(
+    df: pd.DataFrame,
+    out_path: Path,
+    rolling: int = 7,
+    use_group_id_short: bool = False,
+    xtick_every: int = 5,
+):
     df = _make_exp_shannon(df)
     metrics = [
         ("centroid_norm", "Centroid norm\n(homogeneity ↑)"),
@@ -369,7 +406,9 @@ def _plot_all_timeseries_together(df: pd.DataFrame, out_path: Path, rolling: int
         return
 
     x = np.arange(len(df), dtype=int)
-    # x = df['group_id'].astype(str).tolist()
+    label_col = _get_label_col(df, use_group_id_short=use_group_id_short)
+    xlabels = df[label_col].astype(str).tolist()
+
     fig, axes = plt.subplots(
         nrows=len(metrics), ncols=1, figsize=(12, 1.55 * len(metrics) + 2.0),
         sharex=True, constrained_layout=True,
@@ -386,10 +425,11 @@ def _plot_all_timeseries_together(df: pd.DataFrame, out_path: Path, rolling: int
         _set_pretty_axes(ax)
         ax.set_ylabel(ylabel, fontsize=9)
 
-    step = 5  # or 20 depending on density
-    axes[-1].set_xticks(range(0, len(x), step))
-    axes[-1].set_xticklabels(x[::step], rotation=90)
-    axes[-1].set_xlabel("Deployment index", fontsize=10)
+    step = max(1, xtick_every)
+    tick_idx = list(range(0, len(x), step))
+    axes[-1].set_xticks(tick_idx)
+    axes[-1].set_xticklabels([xlabels[i] for i in tick_idx], rotation=90)
+    axes[-1].set_xlabel("Deployment / sample", fontsize=10)
     fig.suptitle("Representation geometry", fontsize=13)
     _save(fig, out_path)
 
@@ -453,6 +493,7 @@ def visualize_geometry_metrics_merged(
     rolling: int = 7,
     centroid_cosine_matrix_csv: str | Path | None = None,
     keep_individual_timeseries: bool = True,
+    use_group_id_short: bool = False,
 ):
     metrics_csv = Path(metrics_csv)
     out_dir = Path(out_dir) / "geometry_viz_merged"
@@ -464,6 +505,7 @@ def visualize_geometry_metrics_merged(
 
     df = _maybe_add_dt(df)
     df = _make_exp_shannon(df)
+    df = _with_group_id_short(df)
 
     M = None
     if centroid_cosine_matrix_csv is not None:
@@ -476,25 +518,30 @@ def visualize_geometry_metrics_merged(
                 M = M.loc[keep, keep]
             df = _attach_centroid_cosine_summary(df, M)
 
-            # keep only non-redundant matrix summaries
             _plot_clustered_centroid_heatmap(
                 M,
                 out_dir / "heatmap_centroid_cosine_matrix_clustered",
                 title="Clustered centroid cosine similarity between deployments",
                 method="average",
+                use_group_id_short=use_group_id_short,
             )
             _plot_centroid_dendrogram(
                 M,
                 out_dir / "dendrogram_centroid_cosine",
                 title="Hierarchical clustering of deployments by centroid direction",
                 method="average",
+                use_group_id_short=use_group_id_short,
             )
             _plot_offdiag_hist(M, out_dir / "hist_centroid_cosine_offdiag", bins=32)
 
     df.to_csv(out_dir / "geometry_metrics_used.csv", index=False)
 
-    # One main combined summary plot instead of separate duplicated comparison figures
-    _plot_all_timeseries_together(df, out_dir / "ts_all_metrics_combined", rolling=rolling)
+    _plot_all_timeseries_together(
+        df,
+        out_dir / "ts_all_metrics_combined",
+        rolling=rolling,
+        use_group_id_short=use_group_id_short,
+    )
 
     if keep_individual_timeseries:
         core_ts = [
@@ -514,9 +561,9 @@ def visualize_geometry_metrics_merged(
                     ylabel=ylabel,
                     add_rolling=rolling,
                     annotate=True,
+                    use_group_id_short=use_group_id_short,
                 )
 
-    # Keep the compact rank overlay plus one z-score heatmap
     _plot_rank_overlay(
         df,
         cols=["shannon", "centroid_norm", "eff_rank"],
@@ -531,7 +578,6 @@ def visualize_geometry_metrics_merged(
         title="Metric comparison heatmap across deployments",
     )
 
-    # Selected non-redundant scatters
     scatters = [
         ("centroid_norm", "shannon", "sc_centroid_vs_shannon", "Concentration vs Shannon diversity"),
         ("centroid_norm", "exp_shannon", "sc_centroid_vs_exp_shannon", "Concentration vs effective diversity"),
@@ -551,9 +597,9 @@ def visualize_geometry_metrics_merged(
             xlabel=xcol,
             ylabel=ycol,
             annotate=True,
+            use_group_id_short=use_group_id_short,
         )
 
-    # Core histograms only
     for col in ["centroid_norm", "shannon", "exp_shannon", "pair_cos_p50", "eff_rank"]:
         if col in df.columns:
             _plot_hist(
@@ -577,4 +623,5 @@ if __name__ == "__main__":
         rolling=4,
         centroid_cosine_matrix_csv=path + r"\centroid_cosine_matrix.csv",
         keep_individual_timeseries=True,
+        use_group_id_short=True,   # <- set False to use full group_id labels
     )
