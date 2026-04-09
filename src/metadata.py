@@ -56,7 +56,11 @@ def _shorten_sample_id(raw: str) -> str:
     s = str(raw)
     parts = s.split("_")
     if len(parts) >= 3:
-        return parts[2]
+        val = parts[2]
+        try:
+            return f"{int(val):04d}"  # enforce 4-digit zero padding
+        except ValueError:
+            return val  # fallback if not numeric
     return s
 
 
