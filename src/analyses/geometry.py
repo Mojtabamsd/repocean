@@ -49,6 +49,79 @@ def _counts_from_labels(labels: np.ndarray) -> dict[str, int]:
     return {str(v): int(c) for v, c in zip(vals, counts)}
 
 
+def _compute_nmds_from_count_rows(
+    count_rows: list[dict],
+    seed: int,
+    prefix: str,
+    out_root: Path | None = None,
+) -> pd.DataFrame:
+    """
+    count_rows:
+        [
+            {"run_id": ..., "group_id": ..., "label_counts": {...}},
+            ...
+        ]
+
+    returns DataFrame with:
+        run_id, group_id, {prefix}_nmds1, {prefix}_nmds2
+    """
+    if len(count_rows) < 2:
+        out = pd.DataFrame(
+            [{"run_id": r["run_id"], "group_id": r["group_id"]} for r in count_rows]
+        )
+        out[f"{prefix}_nmds1"] = np.nan
+        out[f"{prefix}_nmds2"] = np.nan
+        return out
+
+    counts_df = pd.DataFrame(
+        [
+            {
+                "run_id": r["run_id"],
+                "group_id": r["group_id"],
+                **r["label_counts"],
+            }
+            for r in count_rows
+        ]
+    ).fillna(0)
+
+    meta_cols = ["run_id", "group_id"]
+    label_cols = [c for c in counts_df.columns if c not in meta_cols]
+
+    if len(label_cols) == 0:
+        out = counts_df[meta_cols].copy()
+        out[f"{prefix}_nmds1"] = np.nan
+        out[f"{prefix}_nmds2"] = np.nan
+        return out
+
+    X_counts = counts_df[label_cols].to_numpy(dtype=float)
+    D = squareform(pdist(X_counts, metric="braycurtis"))
+
+    nmds = MDS(
+        n_components=2,
+        metric=False,
+        dissimilarity="precomputed",
+        random_state=seed,
+        n_init=10,
+        max_iter=1000,
+        normalized_stress="auto",
+    )
+    Y = nmds.fit_transform(D)
+
+    out = counts_df[meta_cols].copy()
+    out[f"{prefix}_nmds1"] = Y[:, 0]
+    out[f"{prefix}_nmds2"] = Y[:, 1]
+
+    if out_root is not None:
+        counts_df.to_csv(out_root / f"{prefix}_deployment_label_counts.csv", index=False)
+        pd.DataFrame(
+            D,
+            index=[f"{r}::{g}" for r, g in zip(counts_df["run_id"], counts_df["group_id"])],
+            columns=[f"{r}::{g}" for r, g in zip(counts_df["run_id"], counts_df["group_id"])],
+        ).to_csv(out_root / f"{prefix}_deployment_label_braycurtis_matrix.csv")
+
+    return out
+
+
 def _find_predictions_csv(features_path: str | Path) -> Path:
     """
     Assumes predictions_with_top3_scores.csv lives next to the feature file,
@@ -77,8 +150,8 @@ def run_geometry_summary(
     sample_per_group: int = 2000,
     seed: int = 42,
     pair_samples: int = 5000,
-    # pred_label_col: str = "object_annotation_category", # 'Top-1 Predicted Label' or 'object_annotation_category' which is Amanda prediction
-    pred_label_col: str = "Top-1 Predicted Label", # 'Top-1 Predicted Label' or 'object_annotation_category' which is Amanda prediction
+    pred_label_col: str = "Top-1 Predicted Label",
+taxonomist_label_col: str = "object_annotation_category",
     # exclude_labels: list[str] = {"detritus"}  # list[str] | set[str] | None = None, or {"detritus", "artefact"}
     exclude_labels: None = None  # list[str] | set[str] | None = None, or {"detritus", "artefact"}
 ) -> pd.DataFrame:
@@ -111,7 +184,8 @@ def run_geometry_summary(
     rows = []
     centroid_dirs = []
     centroid_keys = []
-    count_rows = []
+    pred_count_rows = []
+    tax_count_rows = []
 
     # optional cache so each run CSV is only loaded once
     pred_cache: dict[str, pd.DataFrame] = {}
@@ -145,13 +219,14 @@ def run_geometry_summary(
         if run_id not in pred_cache:
             pred_csv = _find_predictions_csv(features_path)
             pred_df = pd.read_csv(pred_csv)
+
             if pred_label_col not in pred_df.columns:
-                raise KeyError(
-                    f"Column '{pred_label_col}' not found in {pred_csv}"
-                )
+                raise KeyError(f"Column '{pred_label_col}' not found in {pred_csv}")
+
             pred_cache[run_id] = pred_df
 
         pred_df = pred_cache[run_id]
+        has_taxonomist_col = taxonomist_label_col in pred_df.columns
 
         if len(pred_df) < int(idx_all.max()) + 1:
             raise ValueError(
@@ -162,31 +237,47 @@ def run_geometry_summary(
         # -----------------------
         # FILTER INDICES HERE
         # -----------------------
-        labels_full = pred_df.iloc[idx_all][pred_label_col].to_numpy()
+        pred_labels_full = pred_df.iloc[idx_all][pred_label_col].to_numpy()
+
+        if has_taxonomist_col:
+            tax_labels_full = pred_df.iloc[idx_all][taxonomist_label_col].to_numpy()
+        else:
+            tax_labels_full = None
 
         if exclude_labels:
-            keep_mask = ~pd.Series(labels_full).isin(exclude_labels).to_numpy()
+            keep_mask = ~pd.Series(pred_labels_full).isin(exclude_labels).to_numpy()
             idx_all = idx_all[keep_mask]
-            labels_full = labels_full[keep_mask]
+            pred_labels_full = pred_labels_full[keep_mask]
+            if tax_labels_full is not None:
+                tax_labels_full = tax_labels_full[keep_mask]
 
         num_rows = int(idx_all.size)
         if num_rows == 0:
             continue
 
-        label_count_dict = _counts_from_labels(labels_full)
-
-        count_rows.append(
+        pred_count_rows.append(
             {
                 "run_id": run_id,
                 "group_id": group_id,
-                "label_counts": label_count_dict,
+                "label_counts": _counts_from_labels(pred_labels_full),
             }
         )
 
-        # -----------------------
-        # Shannon on filtered set
-        # -----------------------
-        pred_shannon, pred_exp_shannon, pred_num_classes_present = _shannon_from_labels(labels_full)
+        pred_shannon, pred_exp_shannon, pred_num_classes_present = _shannon_from_labels(pred_labels_full)
+
+        if tax_labels_full is not None:
+            tax_count_rows.append(
+                {
+                    "run_id": run_id,
+                    "group_id": group_id,
+                    "label_counts": _counts_from_labels(tax_labels_full),
+                }
+            )
+            tax_shannon, tax_exp_shannon, tax_num_classes_present = _shannon_from_labels(tax_labels_full)
+        else:
+            tax_shannon = np.nan
+            tax_exp_shannon = np.nan
+            tax_num_classes_present = np.nan
 
         # -----------------------
         # Sample filtered rows for geometry
@@ -287,6 +378,12 @@ def run_geometry_summary(
                 "shannon": round(pred_shannon, 6) if np.isfinite(pred_shannon) else pred_shannon,
                 "exp_shannon": round(pred_exp_shannon, 6) if np.isfinite(pred_exp_shannon) else pred_exp_shannon,
 
+                "tax_num_classes_present": (
+                    int(tax_num_classes_present) if pd.notna(tax_num_classes_present) else np.nan
+                ),
+                "tax_shannon": round(tax_shannon, 6) if np.isfinite(tax_shannon) else tax_shannon,
+                "tax_exp_shannon": round(tax_exp_shannon, 6) if np.isfinite(tax_exp_shannon) else tax_exp_shannon,
+
                 "mean_norm": round(mean_norm, 6),
                 "std_norm": round(std_norm, 6),
 
@@ -314,54 +411,39 @@ def run_geometry_summary(
     # -------------------------------------------------
     # NMDS from deployment label-count vectors
     # -------------------------------------------------
-    if len(count_rows) >= 2:
-        counts_df = pd.DataFrame(
-            [
-                {
-                    "run_id": r["run_id"],
-                    "group_id": r["group_id"],
-                    **r["label_counts"],
-                }
-                for r in count_rows
-            ]
-        ).fillna(0)
+    df = pd.DataFrame(rows).sort_values(["run_id", "group_id"]).reset_index(drop=True)
 
-        meta_cols = ["run_id", "group_id"]
-        label_cols = [c for c in counts_df.columns if c not in meta_cols]
+    # -------------------------------------------------
+    # prediction-label NMDS
+    # -------------------------------------------------
+    pred_nmds_df = _compute_nmds_from_count_rows(
+        pred_count_rows,
+        seed=seed,
+        prefix="pred",
+        out_root=out_root,
+    )
+    pred_nmds_df = pred_nmds_df.rename(
+        columns={
+            "pred_nmds1": "nmds1",
+            "pred_nmds2": "nmds2",
+        }
+    )
+    df = df.merge(pred_nmds_df, on=["run_id", "group_id"], how="left")
 
-        X_counts = counts_df[label_cols].to_numpy(dtype=float)
-
-        # Bray-Curtis distance between deployments
-        D = squareform(pdist(X_counts, metric="braycurtis"))
-
-        # NMDS on the precomputed distance matrix
-        nmds = MDS(
-            n_components=2,
-            metric=False,
-            dissimilarity="precomputed",
-            random_state=seed,
-            n_init=10,
-            max_iter=1000,
-            normalized_stress="auto",
+    # -------------------------------------------------
+    # taxonomist-label NMDS
+    # -------------------------------------------------
+    if len(tax_count_rows) > 0:
+        tax_nmds_df = _compute_nmds_from_count_rows(
+            tax_count_rows,
+            seed=seed,
+            prefix="tax",
+            out_root=out_root,
         )
-        Y = nmds.fit_transform(D)
-
-        nmds_df = counts_df[meta_cols].copy()
-        nmds_df["nmds1"] = Y[:, 0]
-        nmds_df["nmds2"] = Y[:, 1]
-
-        # optional: save raw count table and distance matrix too
-        counts_df.to_csv(out_root / "deployment_label_counts.csv", index=False)
-        pd.DataFrame(
-            D,
-            index=[f"{r}::{g}" for r, g in zip(counts_df["run_id"], counts_df["group_id"])],
-            columns=[f"{r}::{g}" for r, g in zip(counts_df["run_id"], counts_df["group_id"])],
-        ).to_csv(out_root / "deployment_label_braycurtis_matrix.csv")
-
-        df = df.merge(nmds_df, on=["run_id", "group_id"], how="left")
+        df = df.merge(tax_nmds_df, on=["run_id", "group_id"], how="left")
     else:
-        df["nmds1"] = np.nan
-        df["nmds2"] = np.nan
+        df["tax_nmds1"] = np.nan
+        df["tax_nmds2"] = np.nan
 
     out_csv = out_root / "geometry_metrics.csv"
     out_csv.parent.mkdir(parents=True, exist_ok=True)
