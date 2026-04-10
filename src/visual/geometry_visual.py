@@ -512,6 +512,124 @@ def _plot_all_timeseries_together(
     _save(fig, out_path)
 
 
+def _plot_all_timeseries_with_dual_shannon(
+    df: pd.DataFrame,
+    out_path: Path,
+    rolling: int = 7,
+    use_group_id_short: bool = False,
+    xtick_every: int = 5,
+):
+    """
+    Similar to ts_all_metrics_combined, but if tax_shannon exists and is not all NaN,
+    add one extra bottom subplot that overlays:
+        - shannon           (prediction)
+        - tax_shannon       (taxonomist)
+    """
+    df = _make_exp_shannon(df)
+
+    metrics = [
+        ("centroid_norm", "Centroid norm\n(homogeneity ↑)"),
+        ("eff_rank", "Effective rank\n(complexity ↑)"),
+        ("cos_p10", "Cosine p10\n(diversity tail ↓)"),
+        ("mean_centroid_cosine_to_others", "Mean centroid cosine\nto others ↑"),
+    ]
+    metrics = [(c, y) for c, y in metrics if c in df.columns]
+
+    has_pred_shannon = "shannon" in df.columns
+    has_tax_shannon = "tax_shannon" in df.columns and pd.to_numeric(
+        df["tax_shannon"], errors="coerce"
+    ).notna().any()
+
+    if not metrics:
+        return
+    if not (has_pred_shannon or has_tax_shannon):
+        return
+
+    x = np.arange(len(df), dtype=int)
+    label_col = _get_label_col(df, use_group_id_short=use_group_id_short)
+    xlabels = df[label_col].astype(str).tolist()
+
+    nrows = len(metrics) + 1
+    fig, axes = plt.subplots(
+        nrows=nrows,
+        ncols=1,
+        figsize=(12, 1.55 * nrows + 2.0),
+        sharex=True,
+        constrained_layout=True,
+    )
+    if nrows == 1:
+        axes = [axes]
+
+    # top geometry panels
+    for ax, (col, ylabel) in zip(axes[:-1], metrics):
+        y = pd.to_numeric(df[col], errors="coerce").values
+        ax.plot(x, y, marker="o", markersize=2.4, linewidth=1.1, alpha=0.9, label=col)
+
+        if rolling and rolling >= 3 and len(y) >= rolling:
+            roll = pd.Series(y).rolling(
+                rolling,
+                center=True,
+                min_periods=max(3, rolling // 3)
+            ).mean().values
+            ax.plot(x, roll, linewidth=2.0, alpha=0.9)
+
+        _set_pretty_axes(ax)
+        ax.set_ylabel(ylabel, fontsize=9)
+
+    # bottom dual-shannon panel
+    ax = axes[-1]
+
+    if has_pred_shannon:
+        y_pred = pd.to_numeric(df["shannon"], errors="coerce").values
+        ax.plot(
+            x, y_pred,
+            marker="o",
+            markersize=2.4,
+            linewidth=1.2,
+            alpha=0.9,
+            label="Prediction Shannon",
+        )
+        if rolling and rolling >= 3 and len(y_pred) >= rolling:
+            roll_pred = pd.Series(y_pred).rolling(
+                rolling,
+                center=True,
+                min_periods=max(3, rolling // 3)
+            ).mean().values
+            ax.plot(x, roll_pred, linewidth=2.0, alpha=0.9)
+
+    if has_tax_shannon:
+        y_tax = pd.to_numeric(df["tax_shannon"], errors="coerce").values
+        ax.plot(
+            x, y_tax,
+            marker="s",
+            markersize=2.6,
+            linewidth=1.2,
+            alpha=0.9,
+            linestyle="--",
+            label="Taxonomist Shannon",
+        )
+        if rolling and rolling >= 3 and len(y_tax) >= rolling:
+            roll_tax = pd.Series(y_tax).rolling(
+                rolling,
+                center=True,
+                min_periods=max(3, rolling // 3)
+            ).mean().values
+            ax.plot(x, roll_tax, linewidth=2.0, alpha=0.9, linestyle="--")
+
+    _set_pretty_axes(ax)
+    ax.set_ylabel("Shannon\n(alpha diversity ↑)", fontsize=9)
+    ax.legend(frameon=False, fontsize=9, loc="best")
+
+    step = max(1, xtick_every)
+    tick_idx = list(range(0, len(x), step))
+    axes[-1].set_xticks(tick_idx)
+    axes[-1].set_xticklabels([xlabels[i] for i in tick_idx], rotation=90)
+    axes[-1].set_xlabel("Deployment / sample", fontsize=10)
+
+    fig.suptitle("Representation geometry + Shannon comparison", fontsize=13)
+    _save(fig, out_path)
+
+
 def _plot_zscore_heatmap(df: pd.DataFrame, cols: list[str], out_path: Path, title: str,
                          use_group_id_short: bool = False,
                          xtick_every: int = 5):
@@ -640,6 +758,14 @@ def visualize_geometry_metrics_merged(
         use_group_id_short=use_group_id_short,
     )
 
+    if "tax_shannon" in df.columns and pd.to_numeric(df["tax_shannon"], errors="coerce").notna().any():
+        _plot_all_timeseries_with_dual_shannon(
+            df,
+            out_dir / "ts_all_metrics_combined_with_taxonomist_shannon",
+            rolling=rolling,
+            use_group_id_short=use_group_id_short,
+        )
+
     if keep_individual_timeseries:
         core_ts = [
             ("centroid_norm", "Centroid norm across deployments", "centroid_norm"),
@@ -723,6 +849,7 @@ if __name__ == "__main__":
     # path = r'C:\alr4\analysis\partitrics\uvp6net\geometry'
     # path = r'C:\alr4\analysis\geometry'
     path = r'C:\alr4\analysis\geometry_all'
+    # path = r'C:\alr4\analysis\geometry\ALL'
     visualize_geometry_metrics_merged(
         metrics_csv=path + r"\geometry_metrics.csv",
         out_dir=path,
