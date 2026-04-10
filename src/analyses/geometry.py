@@ -10,6 +10,8 @@ from src.index import build_group_index
 from src.stream import (
     open_h5, get_h5_shapes, sample_indices_uniform, read_rows_by_indices
 )
+from sklearn.manifold import MDS
+from scipy.spatial.distance import pdist, squareform
 
 
 def _intrinsic_dim_pca(X: np.ndarray, thresholds=(0.90, 0.95)) -> Tuple[int, int]:
@@ -35,6 +37,16 @@ def _shannon_from_labels(labels: np.ndarray) -> Tuple[float, float, int]:
     H = float(-(p * np.log(p)).sum())
     exp_H = float(np.exp(H))
     return H, exp_H, int(len(counts))
+
+
+def _counts_from_labels(labels: np.ndarray) -> dict[str, int]:
+    labels = np.asarray(labels, dtype=object)
+    labels = labels[pd.notna(labels)]
+    if labels.size == 0:
+        return {}
+
+    vals, counts = np.unique(labels, return_counts=True)
+    return {str(v): int(c) for v, c in zip(vals, counts)}
 
 
 def _find_predictions_csv(features_path: str | Path) -> Path:
@@ -65,8 +77,10 @@ def run_geometry_summary(
     sample_per_group: int = 2000,
     seed: int = 42,
     pair_samples: int = 5000,
+    # pred_label_col: str = "object_annotation_category", # 'Top-1 Predicted Label' or 'object_annotation_category' which is Amanda prediction
     pred_label_col: str = "Top-1 Predicted Label", # 'Top-1 Predicted Label' or 'object_annotation_category' which is Amanda prediction
-    exclude_labels: list[str] | set[str] | None = None,
+    # exclude_labels: list[str] = {"detritus"}  # list[str] | set[str] | None = None, or {"detritus", "artefact"}
+    exclude_labels: None = None  # list[str] | set[str] | None = None, or {"detritus", "artefact"}
 ) -> pd.DataFrame:
     """
     Geometry + sphere-aware summary of feature space per group (run or profile/meta).
@@ -97,6 +111,7 @@ def run_geometry_summary(
     rows = []
     centroid_dirs = []
     centroid_keys = []
+    count_rows = []
 
     # optional cache so each run CSV is only loaded once
     pred_cache: dict[str, pd.DataFrame] = {}
@@ -157,6 +172,16 @@ def run_geometry_summary(
         num_rows = int(idx_all.size)
         if num_rows == 0:
             continue
+
+        label_count_dict = _counts_from_labels(labels_full)
+
+        count_rows.append(
+            {
+                "run_id": run_id,
+                "group_id": group_id,
+                "label_counts": label_count_dict,
+            }
+        )
 
         # -----------------------
         # Shannon on filtered set
@@ -285,6 +310,58 @@ def run_geometry_summary(
         )
 
     df = pd.DataFrame(rows).sort_values(["run_id", "group_id"]).reset_index(drop=True)
+
+    # -------------------------------------------------
+    # NMDS from deployment label-count vectors
+    # -------------------------------------------------
+    if len(count_rows) >= 2:
+        counts_df = pd.DataFrame(
+            [
+                {
+                    "run_id": r["run_id"],
+                    "group_id": r["group_id"],
+                    **r["label_counts"],
+                }
+                for r in count_rows
+            ]
+        ).fillna(0)
+
+        meta_cols = ["run_id", "group_id"]
+        label_cols = [c for c in counts_df.columns if c not in meta_cols]
+
+        X_counts = counts_df[label_cols].to_numpy(dtype=float)
+
+        # Bray-Curtis distance between deployments
+        D = squareform(pdist(X_counts, metric="braycurtis"))
+
+        # NMDS on the precomputed distance matrix
+        nmds = MDS(
+            n_components=2,
+            metric=False,
+            dissimilarity="precomputed",
+            random_state=seed,
+            n_init=10,
+            max_iter=1000,
+            normalized_stress="auto",
+        )
+        Y = nmds.fit_transform(D)
+
+        nmds_df = counts_df[meta_cols].copy()
+        nmds_df["nmds1"] = Y[:, 0]
+        nmds_df["nmds2"] = Y[:, 1]
+
+        # optional: save raw count table and distance matrix too
+        counts_df.to_csv(out_root / "deployment_label_counts.csv", index=False)
+        pd.DataFrame(
+            D,
+            index=[f"{r}::{g}" for r, g in zip(counts_df["run_id"], counts_df["group_id"])],
+            columns=[f"{r}::{g}" for r, g in zip(counts_df["run_id"], counts_df["group_id"])],
+        ).to_csv(out_root / "deployment_label_braycurtis_matrix.csv")
+
+        df = df.merge(nmds_df, on=["run_id", "group_id"], how="left")
+    else:
+        df["nmds1"] = np.nan
+        df["nmds2"] = np.nan
 
     out_csv = out_root / "geometry_metrics.csv"
     out_csv.parent.mkdir(parents=True, exist_ok=True)
