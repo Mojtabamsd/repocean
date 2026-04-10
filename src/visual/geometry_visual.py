@@ -280,9 +280,12 @@ def _plot_clustered_centroid_heatmap(
     if n == 0:
         return
 
-    if n > 1:
-        order = _cluster_order_from_similarity(M, method=method)
-        M = M.iloc[order, order]
+    # order or not
+    order_by_similarity = True
+    if order_by_similarity:
+        if n > 1:
+            order = _cluster_order_from_similarity(M, method=method)
+            M = M.iloc[order, order]
 
     A_ord = M.astype(float).values
 
@@ -302,7 +305,7 @@ def _plot_clustered_centroid_heatmap(
     cbar.set_label("centroid cosine", fontsize=10)
     ax.set_title(title, fontsize=12)
 
-    if n <= 60:
+    if n <= 200:
         ax.set_xticks(np.arange(n))
         ax.set_yticks(np.arange(n))
         ax.set_xticklabels(labels, rotation=90, fontsize=7)
@@ -434,7 +437,9 @@ def _plot_all_timeseries_together(
     _save(fig, out_path)
 
 
-def _plot_zscore_heatmap(df: pd.DataFrame, cols: list[str], out_path: Path, title: str):
+def _plot_zscore_heatmap(df: pd.DataFrame, cols: list[str], out_path: Path, title: str,
+                         use_group_id_short: bool = False,
+                         xtick_every: int = 5):
     cols = [c for c in cols if c in df.columns]
     if not cols:
         return
@@ -448,14 +453,31 @@ def _plot_zscore_heatmap(df: pd.DataFrame, cols: list[str], out_path: Path, titl
     fig, ax = plt.subplots(figsize=(12, max(2.6, 0.55 * len(cols) + 0.8)))
     im = ax.imshow(data, aspect="auto")
     ax.set_yticks(range(len(cols)))
-    ax.set_yticklabels(cols, fontsize=9)
+    import textwrap
 
-    tick_idx = np.unique(np.linspace(0, max(0, Z.shape[0] - 1), min(10, max(1, Z.shape[0]))).astype(int))
+    wrapped_cols = [
+        "\n".join(textwrap.wrap(str(c), width=14))
+        for c in cols
+    ]
+    ax.set_yticklabels(wrapped_cols, fontsize=9)
+
+
+    x = np.arange(len(df), dtype=int)
+    label_col = _get_label_col(df, use_group_id_short=use_group_id_short)
+    xlabels = df[label_col].astype(str).tolist()
+
+    step = max(1, xtick_every)
+    tick_idx = list(range(0, len(x), step))
     ax.set_xticks(tick_idx)
-    ax.set_xticklabels(tick_idx, fontsize=9)
-    ax.set_title(title)
-    ax.set_xlabel("Deployment index (ordered)")
-    ax.set_ylabel("Metric (z-score)")
+    ax.set_xticklabels([xlabels[i] for i in tick_idx], rotation=90)
+    ax.set_xlabel("Deployment / sample", fontsize=10)
+
+    # tick_idx = np.unique(np.linspace(0, max(0, Z.shape[0] - 1), min(10, max(1, Z.shape[0]))).astype(int))
+    # ax.set_xticks(tick_idx)
+    # ax.set_xticklabels(tick_idx, fontsize=9)
+    # ax.set_title(title)
+    ax.set_xlabel("Deployment / sample", fontsize=10)
+    # ax.set_ylabel("Metric (z-score)", fontsize=10)
     cbar = plt.colorbar(im, ax=ax, fraction=0.04, pad=0.02)
     cbar.set_label("z-score")
     plt.tight_layout()
@@ -573,9 +595,10 @@ def visualize_geometry_metrics_merged(
 
     _plot_zscore_heatmap(
         df,
-        cols=["centroid_norm", "shannon", "exp_shannon", "cos_p10", "pair_cos_p50", "eff_rank"],
+        cols=["centroid_norm", "eff_rank", "cos_p10", "mean_centroid_cosine_to_others"],
         out_path=out_dir / "heatmap_metric_zscores",
         title="Metric comparison heatmap across deployments",
+        use_group_id_short=use_group_id_short
     )
 
     scatters = [
