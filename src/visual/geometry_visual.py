@@ -200,6 +200,81 @@ def _plot_scatter(
     _save(fig, out_path)
 
 
+def _plot_nmds_colored(
+    df: pd.DataFrame,
+    out_path: Path,
+    color_col: str = "centroid_norm",
+    title: str = "NMDS of deployments coloured by centroid norm",
+    annotate: bool = True,
+    use_group_id_short: bool = False,
+):
+    if "nmds1" not in df.columns or "nmds2" not in df.columns or color_col not in df.columns:
+        return
+
+    x = pd.to_numeric(df["nmds1"], errors="coerce").values
+    y = pd.to_numeric(df["nmds2"], errors="coerce").values
+    c = pd.to_numeric(df[color_col], errors="coerce").values
+
+    label_col = _get_label_col(df, use_group_id_short=use_group_id_short)
+    labels = df[label_col].astype(str).tolist()
+
+    good = np.isfinite(x) & np.isfinite(y) & np.isfinite(c)
+    if good.sum() == 0:
+        return
+
+    if "sampled" in df.columns:
+        s = pd.to_numeric(df["sampled"], errors="coerce").fillna(0.0).values
+        s_pos = s[s > 0]
+        if len(s_pos) > 0:
+            clip_hi = np.nanpercentile(s_pos, 95)
+            s = np.clip(s, 0, clip_hi)
+            sizes = 24 + 80 * (s / (s.max() if s.max() > 0 else 1.0))
+        else:
+            sizes = np.full(len(df), 36.0)
+    else:
+        sizes = np.full(len(df), 36.0)
+
+    fig = plt.figure(figsize=(7.2, 5.8))
+    ax = fig.add_subplot(111)
+
+    sc = ax.scatter(
+        x[good],
+        y[good],
+        c=c[good],
+        s=sizes[good],
+        alpha=0.8,
+    )
+
+    cbar = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label(color_col, fontsize=10)
+
+    ax.set_title(title, fontsize=12)
+    ax.set_xlabel("NMDS1", fontsize=10)
+    ax.set_ylabel("NMDS2", fontsize=10)
+    _set_pretty_axes(ax)
+
+    # nice reference lines
+    ax.axhline(0, linewidth=0.8, alpha=0.25)
+    ax.axvline(0, linewidth=0.8, alpha=0.25)
+
+    if annotate and good.sum() >= 8:
+        idx = np.where(good)[0]
+        score = (
+            np.abs((x[good] - np.nanmean(x[good])) / (np.nanstd(x[good]) + 1e-12)) +
+            np.abs((y[good] - np.nanmean(y[good])) / (np.nanstd(y[good]) + 1e-12))
+        )
+        pick = idx[np.argsort(score)[-8:]]
+        for i in pick:
+            ax.annotate(
+                labels[i],
+                (x[i], y[i]),
+                fontsize=8,
+                xytext=(4, 4),
+                textcoords="offset points",
+            )
+
+    _save(fig, out_path)
+
 def _plot_hist(df: pd.DataFrame, col: str, out_path: Path, title: str, xlabel: str, bins: int = 30):
     if col not in df.columns:
         return
@@ -622,6 +697,15 @@ def visualize_geometry_metrics_merged(
             annotate=True,
             use_group_id_short=use_group_id_short,
         )
+
+    _plot_nmds_colored(
+        df,
+        out_dir / "sc_nmds_colored_by_centroid_norm",
+        color_col="centroid_norm",
+        title="NMDS of deployments coloured by centroid norm",
+        annotate=True,
+        use_group_id_short=use_group_id_short,
+    )
 
     for col in ["centroid_norm", "shannon", "exp_shannon", "pair_cos_p50", "eff_rank"]:
         if col in df.columns:
