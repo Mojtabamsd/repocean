@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 
 from scipy.cluster.hierarchy import linkage, leaves_list, dendrogram
 from scipy.spatial.distance import squareform
+from sklearn.manifold import MDS
 
 
 # -----------------------------
@@ -231,6 +232,89 @@ def run_ecology_outputs(
     return bc, sh, counts
 
 
+def run_nmds(
+    dist_df: pd.DataFrame,
+    n_components: int = 2,
+    n_init: int = 8,
+    max_iter: int = 300,
+    random_state: int = 0,
+):
+    """
+    NMDS on a precomputed distance matrix (e.g., Bray–Curtis).
+    Returns:
+      coords_df: columns ['NMDS1','NMDS2',(...)] indexed by dataset id
+      stress: final stress value (lower is better)
+    """
+    D = dist_df.to_numpy()
+
+    # Non-metric MDS = NMDS-like
+    mds = MDS(
+        n_components=n_components,
+        metric=False,
+        dissimilarity="precomputed",
+        n_init=n_init,
+        max_iter=max_iter,
+        random_state=random_state,
+        normalized_stress="auto",  # sklearn>=1.2
+    )
+    coords = mds.fit_transform(D)
+    stress = getattr(mds, "stress_", None)
+
+    cols = [f"NMDS{i+1}" for i in range(n_components)]
+    coords_df = pd.DataFrame(coords, index=dist_df.index, columns=cols)
+    return coords_df, stress
+
+
+def save_nmds_plot(
+    coords_df: pd.DataFrame,
+    shannon_df: pd.DataFrame = None,
+    out_png: str = "nmds_braycurtis.png",
+    label_max_chars: int = 28,
+    figsize=(9, 7),
+):
+    """
+    Scatter plot of NMDS coordinates.
+    If shannon_df is provided, point size reflects Shannon (alpha diversity).
+    """
+    def _shorten(s: str) -> str:
+        s = str(s)
+        return s if len(s) <= label_max_chars else (s[: label_max_chars - 1] + "…")
+
+    labels = [_shorten(x) for x in coords_df.index.tolist()]
+
+    x = coords_df["NMDS1"].to_numpy()
+    y = coords_df["NMDS2"].to_numpy()
+
+    sizes = None
+    if shannon_df is not None and "Shannon" in shannon_df.columns:
+        sh = shannon_df.loc[coords_df.index, "Shannon"].to_numpy()
+        # scale sizes so plot looks decent
+        sizes = 40 + 200 * (sh - sh.min()) / (sh.max() - sh.min() + 1e-9)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    if sizes is None:
+        ax.scatter(x, y, s=80, alpha=0.85)
+    else:
+        ax.scatter(x, y, s=sizes, alpha=0.85)
+
+    # annotate points
+    for xi, yi, lab in zip(x, y, labels):
+        ax.text(xi, yi, lab, fontsize=8, ha="left", va="center")
+
+    ax.set_title("NMDS ordination (from Bray–Curtis distances)")
+    ax.set_xlabel("NMDS1")
+    ax.set_ylabel("NMDS2")
+    ax.axhline(0, linewidth=0.5)
+    ax.axvline(0, linewidth=0.5)
+
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=300)
+    plt.close(fig)
+    print(f"Saved {out_png}")
+
+
+
+
 path = r'C:\alr4\ai_predict_all\prediction_parti20260119121141'
 # df_name_ = r'\predictions_with_top3_scores_s.csv'
 df_name_ = r'\predictions_with_top3_scores.csv'
@@ -246,6 +330,19 @@ bc, sh, counts = run_ecology_outputs(
     label_col="Top-1 Predicted Label",
     out_prefix="ALR4",
     root_dir=path
+)
+
+out_prefix = 'ALR4'
+# 5) NMDS from Bray–Curtis + save plot
+coords_df, stress = run_nmds(bc, n_components=2, random_state=0)
+coords_out = path + f"\{out_prefix}_nmds_coords.csv"
+coords_df.to_csv(coords_out)
+print(f"Saved {coords_out} (stress={stress})")
+
+save_nmds_plot(
+    coords_df,
+    shannon_df=sh,  # point size reflects Shannon (optional)
+    out_png=path + f"\{out_prefix}_nmds_braycurtis.png",
 )
 
 
