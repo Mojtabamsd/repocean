@@ -146,12 +146,14 @@ def run_geometry_summary(
     parent_dir: str,
     out_dir: str,
     group_mode: str = "run",          # "run" | "meta"
-    group_col: str = "sample_id",     # used when group_mode == "meta"
+    group_col: str = "sample_id",     # used when group_mode == "meta", sample_id or object_depth_min
+    depth_bin_size: float | int | None = None,
+    profile_col: str = "sample_id",
     sample_per_group: int = 2000,
     seed: int = 42,
     pair_samples: int = 5000,
     pred_label_col: str = "Top-1 Predicted Label",
-taxonomist_label_col: str = "object_annotation_category",
+    taxonomist_label_col: str = "object_annotation_category",
     # exclude_labels: list[str] = {"detritus"}  # list[str] | set[str] | None = None, or {"detritus", "artefact"}
     exclude_labels: None = None  # list[str] | set[str] | None = None, or {"detritus", "artefact"}
 ) -> pd.DataFrame:
@@ -175,6 +177,8 @@ taxonomist_label_col: str = "object_annotation_category",
         parent_dir=parent_dir,
         mode="run" if group_mode == "run" else "meta",
         group_col=group_col,
+        depth_bin_size=depth_bin_size,
+        profile_col=profile_col,
     )
     if groups.empty:
         raise RuntimeError(
