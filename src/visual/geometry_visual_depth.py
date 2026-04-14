@@ -492,6 +492,116 @@ def _plot_vertical_turnover(
     _save(fig, out_path)
 
 
+def _plot_label_dominance_heatmap_profile_depth(
+    label_counts_csv: str | Path,
+    out_path: Path,
+    title: str,
+    use_profile_id_short: bool = True,
+    annotate: bool = True,
+):
+    lab = pd.read_csv(label_counts_csv)
+    if lab.empty:
+        return
+
+    # derive profile/depth from group_id if needed
+    profs = []
+    bins = []
+    for gid in lab["group_id"].astype(str).tolist():
+        p, b = _parse_profile_and_depth_from_group_id(gid)
+        profs.append(p)
+        bins.append(b)
+
+    if "profile_id" not in lab.columns:
+        lab["profile_id"] = profs
+    if "depth_bin" not in lab.columns:
+        lab["depth_bin"] = bins
+
+    lab["depth_mid"] = lab["depth_bin"].apply(_parse_depth_bin_mid)
+    lab = lab[lab["profile_id"].notna() & lab["depth_mid"].notna()].copy()
+    if lab.empty:
+        return
+
+    if use_profile_id_short:
+        lab["profile_label"] = lab["profile_id"].apply(_shorten_sample_id)
+    else:
+        lab["profile_label"] = lab["profile_id"].astype(str)
+
+    # find dominant label per profile-depth group
+    grp_cols = ["profile_id", "profile_label", "depth_mid", "group_id"]
+    idx = lab.groupby(grp_cols)["proportion"].idxmax()
+    dom = lab.loc[idx, grp_cols + ["label_name", "proportion"]].copy()
+    dom = dom.rename(columns={
+        "label_name": "dominant_label",
+        "proportion": "dominant_prop",
+    })
+
+    # pivot for color values
+    val_pivot = dom.pivot_table(
+        index="profile_label",
+        columns="depth_mid",
+        values="dominant_prop",
+        aggfunc="first",
+    ).sort_index(axis=0).sort_index(axis=1)
+
+    # pivot for text labels
+    txt_pivot = dom.pivot_table(
+        index="profile_label",
+        columns="depth_mid",
+        values="dominant_label",
+        aggfunc="first",
+    ).reindex(index=val_pivot.index, columns=val_pivot.columns)
+
+    if val_pivot.empty:
+        return
+
+    data = val_pivot.values.astype(float)
+
+    fig_h = max(4.0, min(14.0, 0.35 * val_pivot.shape[0] + 2.4))
+    fig_w = max(7.0, min(16.0, 0.45 * val_pivot.shape[1] + 4.0))
+    fig = plt.figure(figsize=(fig_w, fig_h))
+    ax = fig.add_subplot(111)
+
+    im = ax.imshow(data, aspect="auto", interpolation="nearest", vmin=0.0, vmax=1.0)
+
+    ax.set_title(title, fontsize=12)
+
+    ax.set_yticks(np.arange(len(val_pivot.index)))
+    ax.set_yticklabels(val_pivot.index.astype(str).tolist(), fontsize=8)
+
+    ax.set_xticks(np.arange(len(val_pivot.columns)))
+    ax.set_xticklabels([f"{v:.0f}" for v in val_pivot.columns], rotation=90, fontsize=8)
+
+    ax.set_xlabel("Depth midpoint (m)", fontsize=10)
+    ax.set_ylabel("Profile", fontsize=10)
+
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
+    cbar.set_label("Dominant label proportion", fontsize=9)
+
+    if annotate:
+        for i in range(txt_pivot.shape[0]):
+            for j in range(txt_pivot.shape[1]):
+                lab_txt = txt_pivot.iat[i, j]
+                val = val_pivot.iat[i, j]
+                if pd.isna(val) or pd.isna(lab_txt):
+                    continue
+
+                s = str(lab_txt)
+                # shorten very long names a bit
+                if len(s) > 12:
+                    s = s[:12] + "…"
+
+                # choose text color based on cell darkness
+                txt_color = "white" if val >= 0.55 else "black"
+                ax.text(
+                    j, i, s,
+                    ha="center", va="center",
+                    fontsize=6.5,
+                    color=txt_color,
+                )
+
+    _save(fig, out_path)
+
+
 # ---------------------------------------------------------------------
 # main entry
 # ---------------------------------------------------------------------
@@ -660,6 +770,34 @@ def visualize_depth_metrics(
                 use_profile_id_short=use_profile_id_short,
             )
 
+    # -------------------------------------------------
+    # 6)  stacked bar composition plot by depth
+    # -------------------------------------------------
+    base_dir = metrics_csv.parent
+
+    pred_label_csv = base_dir / "pred_label_counts_long.csv"
+    tax_label_csv = base_dir / "tax_label_counts_long.csv"
+
+    if pred_label_csv.exists():
+        _plot_label_dominance_heatmap_profile_depth(
+            pred_label_csv,
+            out_path=out_dir / "heatmap_profile_depth_dominant_pred_label",
+            title="Profile × depth dominant prediction label",
+            use_profile_id_short=use_profile_id_short,
+            annotate=True,
+        )
+
+    if tax_label_csv.exists():
+        _plot_label_dominance_heatmap_profile_depth(
+            tax_label_csv,
+            out_path=out_dir / "heatmap_profile_depth_dominant_tax_label",
+            title="Profile × depth dominant taxonomist label",
+            use_profile_id_short=use_profile_id_short,
+            annotate=True,
+        )
+
+
+
     print(f"Saved depth plots to: {out_dir}")
 
 
@@ -672,5 +810,5 @@ if __name__ == "__main__":
         out_dir=Path(path),
         run_id=None,
         use_profile_id_short=False,
-        min_images_per_group=0,
+        min_images_per_group=10,
     )
