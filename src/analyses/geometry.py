@@ -49,6 +49,70 @@ def _counts_from_labels(labels: np.ndarray) -> dict[str, int]:
     return {str(v): int(c) for v, c in zip(vals, counts)}
 
 
+def _count_rows_to_long_df(
+    count_rows: list[dict],
+    label_source: str,
+) -> pd.DataFrame:
+    rows = []
+    for r in count_rows:
+        run_id = r["run_id"]
+        group_id = r["group_id"]
+        label_counts = r["label_counts"]
+
+        total = int(sum(label_counts.values())) if label_counts else 0
+        for label_name, count in sorted(label_counts.items(), key=lambda kv: (-kv[1], kv[0])):
+            rows.append(
+                {
+                    "run_id": run_id,
+                    "group_id": group_id,
+                    "label_source": label_source,
+                    "label_name": str(label_name),
+                    "count": int(count),
+                    "proportion": (float(count) / total) if total > 0 else np.nan,
+                    "total_in_group": total,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _count_rows_to_topk_summary(
+    count_rows: list[dict],
+    label_source: str,
+    top_k: int = 3,
+) -> pd.DataFrame:
+    rows = []
+    for r in count_rows:
+        run_id = r["run_id"]
+        group_id = r["group_id"]
+        label_counts = r["label_counts"]
+
+        items = sorted(label_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        total = int(sum(label_counts.values())) if label_counts else 0
+
+        row = {
+            "run_id": run_id,
+            "group_id": group_id,
+            "label_source": label_source,
+            "n_labels_present": int(len(items)),
+            "total_in_group": total,
+        }
+
+        for k in range(top_k):
+            if k < len(items):
+                lab, cnt = items[k]
+                row[f"top{k+1}_label"] = str(lab)
+                row[f"top{k+1}_count"] = int(cnt)
+                row[f"top{k+1}_prop"] = (float(cnt) / total) if total > 0 else np.nan
+            else:
+                row[f"top{k+1}_label"] = np.nan
+                row[f"top{k+1}_count"] = np.nan
+                row[f"top{k+1}_prop"] = np.nan
+
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
 def _compute_nmds_from_count_rows(
     count_rows: list[dict],
     seed: int,
@@ -481,5 +545,28 @@ def run_geometry_summary(
                 )
 
         pd.DataFrame(pair_rows).to_csv(out_root / "centroid_cosine_pairs.csv", index=False)
+
+    # -------------------------------------------------
+    # tidy label-count tables for inspection / plotting
+    # -------------------------------------------------
+    pred_long_df = _count_rows_to_long_df(pred_count_rows, label_source="pred")
+    pred_long_df.to_csv(out_root / "pred_label_counts_long.csv", index=False)
+
+    if len(tax_count_rows) > 0:
+        tax_long_df = _count_rows_to_long_df(tax_count_rows, label_source="tax")
+        tax_long_df.to_csv(out_root / "tax_label_counts_long.csv", index=False)
+    else:
+        pd.DataFrame(
+            columns=["run_id", "group_id", "label_source", "label_name", "count", "proportion", "total_in_group"]
+        ).to_csv(out_root / "tax_label_counts_long.csv", index=False)
+
+    _count_rows_to_topk_summary(pred_count_rows, "pred", top_k=3).to_csv(
+        out_root / "pred_group_label_summary.csv", index=False
+    )
+
+    if len(tax_count_rows) > 0:
+        _count_rows_to_topk_summary(tax_count_rows, "tax", top_k=3).to_csv(
+            out_root / "tax_group_label_summary.csv", index=False
+        )
 
     return df
