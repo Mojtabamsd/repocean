@@ -268,6 +268,7 @@ def _plot_metric_heatmap_profile_depth(
     title: str,
     use_profile_id_short: bool = True,
     row_zscore: bool = False,
+    annotate: bool = True,
 ):
     if metric_col not in df.columns:
         return
@@ -288,6 +289,13 @@ def _plot_metric_heatmap_profile_depth(
         aggfunc="mean",
     ).sort_index(axis=0).sort_index(axis=1)
 
+    count_pivot = sub.pivot_table(
+        index=prof_col,
+        columns="depth_mid",
+        values="num_rows",
+        aggfunc="sum",
+    ).reindex(index=pivot.index, columns=pivot.columns)
+
     if pivot.empty:
         return
 
@@ -304,6 +312,21 @@ def _plot_metric_heatmap_profile_depth(
     ax = fig.add_subplot(111)
 
     im = ax.imshow(data, aspect="auto", interpolation="nearest")
+
+    if annotate:
+        for i in range(pivot.shape[0]):
+            for j in range(pivot.shape[1]):
+                n = count_pivot.iat[i, j]
+                if pd.isna(n):
+                    continue
+                ax.text(
+                    j, i, f"{int(n)}",
+                    ha="center", va="center",
+                    fontsize=6.5,
+                    color="white" if np.isfinite(data[i, j]) and data[i, j] > np.nanmean(data) else "black",
+                )
+
+
     ax.set_title(title, fontsize=12)
 
     ax.set_yticks(np.arange(len(pivot.index)))
@@ -717,6 +740,7 @@ def visualize_depth_metrics(
                 title=title,
                 use_profile_id_short=use_profile_id_short,
                 row_zscore=False,
+                annotate=True,
             )
             _plot_metric_heatmap_profile_depth(
                 df,
@@ -725,6 +749,7 @@ def visualize_depth_metrics(
                 title=title + " (row z-score)",
                 use_profile_id_short=use_profile_id_short,
                 row_zscore=True,
+                annotate=True,
             )
 
     # -------------------------------------------------
@@ -810,5 +835,5 @@ if __name__ == "__main__":
         out_dir=Path(path),
         run_id=None,
         use_profile_id_short=False,
-        min_images_per_group=10,
+        min_images_per_group=0,
     )
