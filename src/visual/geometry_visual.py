@@ -204,15 +204,18 @@ def _plot_nmds_colored(
     df: pd.DataFrame,
     out_path: Path,
     color_col: str = "centroid_norm",
+    nmds_name_col: str = "tax_nmds",
     title: str = "NMDS of deployments coloured by centroid norm",
     annotate: bool = True,
     use_group_id_short: bool = False,
 ):
-    if "nmds1" not in df.columns or "nmds2" not in df.columns or color_col not in df.columns:
+    nmds1_name = nmds_name_col + "1"
+    nmds2_name = nmds_name_col + "2"
+    if nmds1_name not in df.columns or nmds2_name not in df.columns or color_col not in df.columns:
         return
 
-    x = pd.to_numeric(df["nmds1"], errors="coerce").values
-    y = pd.to_numeric(df["nmds2"], errors="coerce").values
+    x = pd.to_numeric(df[nmds1_name], errors="coerce").values
+    y = pd.to_numeric(df[nmds2_name], errors="coerce").values
     c = pd.to_numeric(df[color_col], errors="coerce").values
 
     label_col = _get_label_col(df, use_group_id_short=use_group_id_short)
@@ -356,13 +359,19 @@ def _plot_clustered_centroid_heatmap(
         return
 
     # order or not
-    order_by_similarity = True
+    order_by_similarity = False
     if order_by_similarity:
         if n > 1:
             order = _cluster_order_from_similarity(M, method=method)
             M = M.iloc[order, order]
 
     A_ord = M.astype(float).values
+
+    keep_lower_triangle_only = True
+    if keep_lower_triangle_only := True:
+        # mask upper triangle (including diagonal if you want)
+        mask = np.triu(np.ones_like(A_ord, dtype=bool), k=1)  # k=0 removes diagonal too
+        A_ord = np.ma.masked_where(mask, A_ord)
 
     raw_labels = [l.split("::")[-1] for l in M.index.astype(str).tolist()]
     if use_group_id_short:
@@ -643,7 +652,7 @@ def _plot_zscore_heatmap(df: pd.DataFrame, cols: list[str], out_path: Path, titl
         Z[c] = (v - v.mean()) / (v.std(ddof=0) + 1e-12)
 
     data = Z.T.values
-    fig, ax = plt.subplots(figsize=(12, max(2.6, 0.55 * len(cols) + 0.8)))
+    fig, ax = plt.subplots(figsize=(12, max(4.6, 0.55 * len(cols) + 0.8)))
     im = ax.imshow(data, aspect="auto")
     ax.set_yticks(range(len(cols)))
     import textwrap
@@ -756,6 +765,7 @@ def visualize_geometry_metrics_merged(
         out_dir / "ts_all_metrics_combined",
         rolling=rolling,
         use_group_id_short=use_group_id_short,
+        xtick_every=1,
     )
 
     if "tax_shannon" in df.columns and pd.to_numeric(df["tax_shannon"], errors="coerce").notna().any():
@@ -764,6 +774,7 @@ def visualize_geometry_metrics_merged(
             out_dir / "ts_all_metrics_combined_with_taxonomist_shannon",
             rolling=rolling,
             use_group_id_short=use_group_id_short,
+            xtick_every=1,
         )
 
     if keep_individual_timeseries:
@@ -799,7 +810,8 @@ def visualize_geometry_metrics_merged(
         cols=["centroid_norm", "eff_rank", "cos_p10", "mean_centroid_cosine_to_others"],
         out_path=out_dir / "heatmap_metric_zscores",
         title="Metric comparison heatmap across deployments",
-        use_group_id_short=use_group_id_short
+        use_group_id_short=use_group_id_short,
+        xtick_every=1,
     )
 
     scatters = [
@@ -828,7 +840,18 @@ def visualize_geometry_metrics_merged(
         df,
         out_dir / "sc_nmds_colored_by_centroid_norm",
         color_col="centroid_norm",
+        nmds_name_col="tax_nmds",
         title="NMDS of deployments coloured by centroid norm",
+        annotate=True,
+        use_group_id_short=use_group_id_short,
+    )
+
+    _plot_nmds_colored(
+        df,
+        out_dir / "sc_nmds_colored_by_centroid_cosine_to_others",
+        color_col="mean_centroid_cosine_to_others",
+        nmds_name_col="tax_nmds",
+        title="NMDS of deployments coloured by centroid cosine similarity to other deployments",
         annotate=True,
         use_group_id_short=use_group_id_short,
     )
@@ -847,8 +870,8 @@ def visualize_geometry_metrics_merged(
 
 if __name__ == "__main__":
     # path = r'C:\alr4\analysis\partitrics\uvp6net\geometry'
-    # path = r'C:\alr4\analysis\geometry'
-    path = r'C:\alr4\analysis\geometry_all'
+    path = r'C:\alr4\analysis\geometry'
+    # path = r'C:\alr4\analysis\geometry_all'
     # path = r'C:\alr4\analysis\geometry\ALL'
     visualize_geometry_metrics_merged(
         metrics_csv=path + r"\geometry_metrics.csv",
