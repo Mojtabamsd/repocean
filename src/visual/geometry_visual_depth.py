@@ -114,6 +114,63 @@ def _choose_profile_label_col(df: pd.DataFrame, use_profile_id_short: bool = Tru
     return "profile_id"
 
 
+def _plot_depth_metric_summary(
+    df: pd.DataFrame,
+    metric_cols: list[str],
+    out_path: Path,
+    title: str = "Overall depth-wise summary of representation geometry",
+):
+    metric_cols = [c for c in metric_cols if c in df.columns]
+    if not metric_cols:
+        return
+
+    sub = df.copy()
+    sub["depth_mid"] = pd.to_numeric(sub["depth_mid"], errors="coerce")
+    sub = sub[sub["depth_mid"].notna()].copy()
+    if sub.empty:
+        return
+
+    nrows = len(metric_cols)
+    fig, axes = plt.subplots(
+        nrows=nrows,
+        ncols=1,
+        figsize=(8.5, 2.2 * nrows + 1.5),
+        sharex=True,
+        constrained_layout=True,
+    )
+    if nrows == 1:
+        axes = [axes]
+
+    ylabels = {
+        "centroid_norm": "Centroid norm\n(homogeneity ↑)",
+        "eff_rank": "Effective rank\n(complexity ↑)",
+        "mean_centroid_cosine_to_others": "Mean centroid cosine\nto others ↑",
+    }
+
+    for ax, col in zip(axes, metric_cols):
+        tmp = sub[["depth_mid", col]].copy()
+        tmp[col] = pd.to_numeric(tmp[col], errors="coerce")
+        tmp = tmp.dropna()
+        if tmp.empty:
+            ax.axis("off")
+            continue
+
+        g = tmp.groupby("depth_mid")[col]
+        q = g.quantile([0.25, 0.50, 0.75]).unstack()
+        q.columns = ["q25", "q50", "q75"]
+        q = q.sort_index()
+
+        x = q.index.values.astype(float)
+        ax.plot(x, q["q50"].values, marker="o", linewidth=1.5, markersize=3.2)
+        ax.fill_between(x, q["q25"].values, q["q75"].values, alpha=0.22)
+
+        _set_pretty_axes(ax)
+        ax.set_ylabel(ylabels.get(col, col), fontsize=9)
+
+    axes[-1].set_xlabel("Depth midpoint (m)", fontsize=10)
+    fig.suptitle(title, fontsize=12)
+    _save(fig, out_path)
+
 # ---------------------------------------------------------------------
 # plotting functions
 # ---------------------------------------------------------------------
@@ -526,6 +583,47 @@ def clean_taxon_names(df):
     return df
 
 
+def _read_centroid_cosine_matrix(path: str | Path) -> pd.DataFrame:
+    M = pd.read_csv(path, index_col=0)
+    M.index = M.index.astype(str)
+    M.columns = M.columns.astype(str)
+    return M
+
+
+def _compute_mean_centroid_cosine_to_others(M: pd.DataFrame) -> pd.Series:
+    A = M.astype(float).values.copy()
+    if A.shape[0] <= 1:
+        vals = np.full(A.shape[0], np.nan, dtype=float)
+    else:
+        np.fill_diagonal(A, np.nan)
+        vals = np.nanmean(A, axis=1)
+    return pd.Series(vals, index=M.index, name="mean_centroid_cosine_to_others")
+
+
+def _attach_centroid_cosine_summary(df: pd.DataFrame, M: pd.DataFrame) -> pd.DataFrame:
+    """
+    IMPORTANT:
+    Keep full group_id here for safe merging with centroid matrix.
+    Do NOT use group_id_short here, because it may not be unique.
+    """
+    def _format_group_id(val):
+        return str(val)
+
+    out = df.copy()
+    out["group_key"] = (
+        out["run_id"].astype(str)
+        + "::"
+        + out["group_id"].map(_format_group_id)
+    )
+    mean_sim = _compute_mean_centroid_cosine_to_others(M)
+    return out.merge(
+        mean_sim.rename("mean_centroid_cosine_to_others"),
+        left_on="group_key",
+        right_index=True,
+        how="left",
+        validate="one_to_one",
+    )
+
 def _plot_label_dominance_heatmap_profile_depth(
     label_counts_csv: str | Path,
     out_path: Path,
@@ -645,6 +743,7 @@ def visualize_depth_metrics(
     metrics_csv: str | Path,
     out_dir: str | Path,
     run_id: str | None = None,
+    centroid_cosine_matrix_csv: str | Path | None = None,
     use_profile_id_short: bool = True,
     min_images_per_group: int = 10,
 ):
@@ -657,6 +756,19 @@ def visualize_depth_metrics(
         df = df[df["run_id"] == run_id].copy()
 
     df = _ensure_depth_columns(df)
+
+
+    if centroid_cosine_matrix_csv is not None:
+        centroid_cosine_matrix_csv = Path(centroid_cosine_matrix_csv)
+        if centroid_cosine_matrix_csv.exists():
+            M = _read_centroid_cosine_matrix(centroid_cosine_matrix_csv)
+            if run_id is not None:
+                keep_mask = [idx.startswith(f"{run_id}::") for idx in M.index]
+                keep = M.index[np.array(keep_mask)]
+                M = M.loc[keep, keep]
+            df = _attach_centroid_cosine_summary(df, M)
+
+
 
     # keep only rows with usable depth/profile
     if "profile_id" not in df.columns or "depth_mid" not in df.columns:
@@ -833,7 +945,16 @@ def visualize_depth_metrics(
             annotate=True,
         )
 
-
+    # 7 ) overall summary plots of metrics across depth (with quantiles)
+    _plot_depth_metric_summary(
+        df,
+        metric_cols=[
+            "centroid_norm",
+            "eff_rank",
+            "mean_centroid_cosine_to_others",
+        ],
+        out_path=out_dir / "depth_overall_summary_geometry",
+    )
 
     print(f"Saved depth plots to: {out_dir}")
 
@@ -841,11 +962,13 @@ def visualize_depth_metrics(
 if __name__ == "__main__":
     # Example:
     path = r"C:\alr4\analysis\geometry"
+    path = r"C:\alr4\analysis\geometry\alr\depth\10"
 
     visualize_depth_metrics(
         metrics_csv=Path(path) / "geometry_metrics.csv",
         out_dir=Path(path),
         run_id=None,
-        use_profile_id_short=False,
+        centroid_cosine_matrix_csv=path + r"\centroid_cosine_matrix.csv",
+        use_profile_id_short=True,
         min_images_per_group=0,
     )
