@@ -306,8 +306,10 @@ def _plot_metric_heatmap_profile_depth(
         sd = np.nanstd(data, axis=1, keepdims=True) + 1e-12
         data = (data - mu) / sd
 
-    fig_h = max(4.0, min(14.0, 0.35 * pivot.shape[0] + 2.4))
-    fig_w = max(7.0, min(16.0, 0.45 * pivot.shape[1] + 4.0))
+    # fig_h = max(4.0, min(14.0, 0.35 * pivot.shape[0] + 2.4))
+    # fig_w = max(7.0, min(16.0, 0.45 * pivot.shape[1] + 4.0))
+    fig_h = max(4.0, min(14.0, 0.35 * pivot.shape[0] + 3.4))
+    fig_w = max(7.0, min(16.0, 0.45 * pivot.shape[1] + 5.0))
     fig = plt.figure(figsize=(fig_w, fig_h))
     ax = fig.add_subplot(111)
 
@@ -515,6 +517,15 @@ def _plot_vertical_turnover(
     _save(fig, out_path)
 
 
+def clean_taxon_names(df):
+
+    df['label_name'] = df['label_name'].replace('Copepoda<Maxillopoda', 'Copepoda')
+    df['label_name'] = df['label_name'].replace('Cnidaria<Metazoa', 'Cnidaria')
+    df['label_name'] = df['label_name'].replace('Ctenophora<Metazoa', 'Ctenophora')
+
+    return df
+
+
 def _plot_label_dominance_heatmap_profile_depth(
     label_counts_csv: str | Path,
     out_path: Path,
@@ -523,6 +534,7 @@ def _plot_label_dominance_heatmap_profile_depth(
     annotate: bool = True,
 ):
     lab = pd.read_csv(label_counts_csv)
+    lab = clean_taxon_names(lab)
     if lab.empty:
         return
 
@@ -579,8 +591,8 @@ def _plot_label_dominance_heatmap_profile_depth(
 
     data = val_pivot.values.astype(float)
 
-    fig_h = max(4.0, min(14.0, 0.35 * val_pivot.shape[0] + 2.4))
-    fig_w = max(7.0, min(16.0, 0.45 * val_pivot.shape[1] + 4.0))
+    fig_h = max(4.0, min(14.0, 0.35 * val_pivot.shape[0] + 3.4))
+    fig_w = max(7.0, min(16.0, 0.45 * val_pivot.shape[1] + 5.0))
     fig = plt.figure(figsize=(fig_w, fig_h))
     ax = fig.add_subplot(111)
 
