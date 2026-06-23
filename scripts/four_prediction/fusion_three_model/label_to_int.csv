@@ -1,0 +1,83 @@
+label,ecotaxa_label,count,lineage
+Actinopterygii,Actinopterygii,108,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Chordata>Craniata>Vertebrata>Gnathostomata>Actinopterygii
+Alciopidae,Alciopidae,63,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Annelida>Polychaeta>Errantia>Alciopidae
+Amphipoda,Amphipoda,180,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Arthropoda>Crustacea>Malacostraca>Eumalacostraca>Amphipoda
+Annelida,Annelida,106,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Annelida
+Appendicularia,Appendicularia,144,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Chordata>Tunicata>Appendicularia
+Aulacanthidae,Aulacanthidae,277,living>Eukaryota>Harosa>Rhizaria>Cercozoa>Thecofilosea>Phaeodaria>Phaeocystida>Aulacanthidae
+Aulatractus,Aulatractus,98,living>Eukaryota>Harosa>Rhizaria>Cercozoa>Thecofilosea>Phaeodaria>Phaeosphaerida>Aulosphaeridae>Aulatractus
+Aulosphaeridae,Aulosphaeridae,350,living>Eukaryota>Harosa>Rhizaria>Cercozoa>Thecofilosea>Phaeodaria>Phaeosphaerida>Aulosphaeridae
+Botrynema,Botrynema,41,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Cnidaria>Hydrozoa>Trachylinae>Trachymedusae>Halicreatidae>Botrynema
+Brachyura,Brachyura,10,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Arthropoda>Crustacea>Malacostraca>Eumalacostraca>Decapoda>Pleocyemata>Brachyura
+Calanidae,Calanidae,877,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Arthropoda>Crustacea>Maxillopoda>Copepoda>Calanoida>Calanidae
+Calanoida,Calanoida,13403,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Arthropoda>Crustacea>Maxillopoda>Copepoda>Calanoida
+Cavolinia inflexa,Cavolinia inflexa,66,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Mollusca>Gastropoda>Heterobranchia>Euthyneura>Euopisthobranchia>Thecosomata>Cavoliniidae>Cavolinia>Cavolinia inflexa
+Cavoliniidae,Cavoliniidae,18,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Mollusca>Gastropoda>Heterobranchia>Euthyneura>Euopisthobranchia>Thecosomata>Cavoliniidae
+Chaetognatha,Chaetognatha,530,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Chaetognatha
+Coelodendridae,Coelodendridae,110,living>Eukaryota>Harosa>Rhizaria>Cercozoa>Thecofilosea>Phaeodaria>Phaeodendrida>Coelodendridae
+Coelographis,Coelographis,55,living>Eukaryota>Harosa>Rhizaria>Cercozoa>Thecofilosea>Phaeodaria>Phaeodendrida>Coelodendridae>Coelographis
+Collodaria,Collodaria,607,living>Eukaryota>Harosa>Rhizaria>Retaria>Polycystinea>Collodaria
+Copepoda,Copepoda<Maxillopoda,6069,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Arthropoda>Crustacea>Maxillopoda>Copepoda
+Creseidae,Creseidae,26,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Mollusca>Gastropoda>Heterobranchia>Euthyneura>Euopisthobranchia>Thecosomata>Creseidae
+Creseis acicula,Creseis acicula,153,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Mollusca>Gastropoda>Heterobranchia>Euthyneura>Euopisthobranchia>Thecosomata>Creseidae>Creseis>Creseis acicula
+Crustacea,Crustacea,27,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Arthropoda>Crustacea
+Ctenophora,Ctenophora,195,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Ctenophora
+Euchaetidae,Euchaetidae,17,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Arthropoda>Crustacea>Maxillopoda>Copepoda>Calanoida>Euchaetidae
+Eukrohnia,Eukrohnia,18,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Chaetognatha>Phragmophora>Eukrohniidae>Eukrohnia
+Eumalacostraca,Eumalacostraca,1256,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Arthropoda>Crustacea>Malacostraca>Eumalacostraca
+Euphausiacea,Euphausiacea,23,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Arthropoda>Crustacea>Malacostraca>Eumalacostraca>Euphausiacea
+Foraminifera,Foraminifera,176,living>Eukaryota>Harosa>Rhizaria>Retaria>Foraminifera
+Hydrozoa,Hydrozoa,351,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Cnidaria>Hydrozoa
+Hyperiidea,Hyperiidea,68,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Arthropoda>Crustacea>Malacostraca>Eumalacostraca>Amphipoda>Hyperiidea
+Limacinidae,Limacinidae,42,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Mollusca>Gastropoda>Heterobranchia>Euthyneura>Euopisthobranchia>Thecosomata>Limacinidae
+Medusettidae,Medusettidae,31,living>Eukaryota>Harosa>Rhizaria>Cercozoa>Thecofilosea>Phaeodaria>Phaeogromida>Medusettidae
+Narcomedusae,Narcomedusae,75,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Cnidaria>Hydrozoa>Trachylinae>Narcomedusae
+Ostracoda,Ostracoda,539,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Arthropoda>Crustacea>Oligostraca>Ostracoda
+Periphylla periphylla,Periphylla periphylla,19,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Cnidaria>Scyphozoa>Coronatae>Periphyllidae>Periphylla>Periphylla periphylla
+Phyllodocida,Phyllodocidae,116,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Annelida>Polychaeta>Errantia>Phyllodocidae
+Poeobius,Poeobius,34,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Annelida>Polychaeta>Sedentaria>Canalipalpata>Terebellida>Poeobius
+Rhizaria,Rhizaria,1982,living>Eukaryota>Harosa>Rhizaria
+Salpida,Salpida,207,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Chordata>Tunicata>Thaliacea>Salpida
+Scinidae,Scinidae,19,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Arthropoda>Crustacea>Malacostraca>Eumalacostraca>Amphipoda>Hyperiidea>Scinidae
+Scyphozoa,Scyphozoa,15,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Cnidaria>Scyphozoa
+Siphonophorae,Siphonophorae,114,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Cnidaria>Hydrozoa>Hydroidolina>Siphonophorae
+Solmundella bitentaculata,Solmundella bitentaculata,32,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Cnidaria>Hydrozoa>Trachylinae>Narcomedusae>Aeginidae>Solmundella>Solmundella bitentaculata
+Swima,Swima,221,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Annelida>Polychaeta>Sedentaria>Canalipalpata>Terebellida>Swima
+Thecosomata,Thecosomata,17,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Mollusca>Gastropoda>Heterobranchia>Euthyneura>Euopisthobranchia>Thecosomata
+Tomopteridae,Tomopteridae,41,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Annelida>Polychaeta>Errantia>Tomopteridae
+Trachymedusae,Trachymedusae,36,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Cnidaria>Hydrozoa>Trachylinae>Trachymedusae
+antenna<Calanoida,antenna<Calanoida,338,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Arthropoda>Crustacea>Maxillopoda>Copepoda>Calanoida>antenna
+artefact,artefact,30095,not-living>artefact
+bubble,bubble,44,not-living>artefact>bubble
+chain<Salpida,chain<Salpida,147,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Chordata>Tunicata>Thaliacea>Salpida>chain
+cloud,cloud,242,living>Eukaryota>Harosa>Rhizaria>Retaria>Polycystinea>Collodaria>cloud
+colonial<Aulosphaeridae,colonial<Aulosphaeridae,10,living>Eukaryota>Harosa>Rhizaria>Cercozoa>Thecofilosea>Phaeodaria>Phaeosphaerida>Aulosphaeridae>colonial
+colonial<Coelodendridae,colonial<Coelodendridae,36,living>Eukaryota>Harosa>Rhizaria>Cercozoa>Thecofilosea>Phaeodaria>Phaeodendrida>Coelodendridae>colonial
+copepoda eggs,copepoda eggs,190,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Arthropoda>Crustacea>Maxillopoda>Copepoda>copepoda eggs
+crystal,crystal,3770,not-living>crystal
+darksphere,dark<sphere,340,living>other>othertocheck>sphere>dark
+dead<house,dead<house,900,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Chordata>Tunicata>Appendicularia>house>dead
+detritus,detritus,504634,not-living>detritus
+echinopluteus,echinopluteus,22,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Echinodermata>Echinoidea>echinopluteus
+egg sac<egg,egg sac<egg,72,living>other>egg>egg sac
+fiber,fiber<detritus,32524,not-living>detritus>fiber
+filament,filament<detritus,3306,not-living>detritus>filament
+fuzzy,fuzzy,184,living>Eukaryota>Harosa>Rhizaria>Acantharia>fuzzy
+larvae<Echinodermata,larvae<Echinodermata,12,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Echinodermata>larvae
+like<Copepoda,like<Copepoda,2712,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Arthropoda>Crustacea>Maxillopoda>Copepoda>like
+like<Rhizaria,like<Rhizaria,509,living>Eukaryota>Harosa>Rhizaria>like
+ophiopluteus,ophiopluteus,70,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Echinodermata>Ophiuroidea>ophiopluteus
+other<living,other<living,1572,living>other
+puff,puff,7427,living>Bacteria>Cyanobacteria>Cyanophyceae>Trichodesmium>puff
+reflection,reflection,4592,not-living>artefact>reflection
+small<Cnidaria,small<Cnidaria small-bell<Hydrozoa,908,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Cnidaria>Hydrozoa>small-bell
+solitaryblack,solitaryblack,149,living>Eukaryota>Harosa>Rhizaria>Retaria>Polycystinea>Collodaria>solitaryblack
+solitaryglobule,solitaryglobule,245,living>Eukaryota>Harosa>Rhizaria>Retaria>Polycystinea>Collodaria>solitaryglobule
+spiky<Acantharia,spiky<Acantharia,201,living>Eukaryota>Harosa>Rhizaria>Acantharia>spiky
+spiky<Coelodendridae,spiky<Coelodendridae,108,living>Eukaryota>Harosa>Rhizaria>Cercozoa>Thecofilosea>Phaeodaria>Phaeodendrida>Coelodendridae>spiky
+star<Acantharia,star<Acantharia,411,living>Eukaryota>Harosa>Rhizaria>Acantharia>star
+t004,t004,249,temporary>t004
+tentacle<Cnidaria,tentacle<Cnidaria,371,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Cnidaria>tentacle
+tentacle<Ctenophora,tentacle<Ctenophora,42,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Ctenophora>tentacle
+tuff,tuff,4863,living>>Cyanophyceae>Trichodesmium>tuff
+veliger,veliger,11,living>Eukaryota>Opisthokonta>Holozoa>Metazoa>Mollusca>veliger
