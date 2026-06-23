@@ -1,20 +1,23 @@
 
 import pandas as pd
 
-# path_eco_ref = r'C:\alr4\subset_d_samples_correct.tsv'
-path_eco_fine = r'C:\alr4\subset_d_samples_correct.tsv'
+# path_eco_ref = r'C:\alr4\subset_d_samples_path_corrected.tsv'
+path_eco_fine = r'C:\alr4\subset_d_samples_path_corrected.tsv'
 
-path_pro_ref = r"C:\alr4\ai_predict_all\prediction_parti20260106124204"
-path_pro_fine = r"C:\alr4\ai_predict_all\prediction_parti20260113104208"
+path_root = r'C:\alr4\ai_predict\ai_predict_d_all'
+
+# path_pro_ref = r"C:\alr4\ai_predict_all\prediction_parti20260106124204"
+path_pro_ref = path_root + r"\prediction_parti20260119121141"
+path_pro_fine = path_root + r"\prediction_parti20260324132632_fine"
 
 df_name = r'\predictions_with_top3_scores.csv'
-out_dir = r"C:\alr4\ai_predict_all\merge_four_prediction.csv"
+out_dir = path_root + r"\merge_three_prediction_all.csv"
 
 # df_e_r = pd.read_csv(path_eco_ref, delimiter='\t')
 df_e_f = pd.read_csv(path_eco_fine, delimiter='\t')
 
 df_p_r = pd.read_csv(path_pro_ref + df_name)
-df_p_f = pd.read_csv(path_pro_ref + df_name)
+df_p_f = pd.read_csv(path_pro_fine + df_name)
 
 df_p_r = df_p_r.rename(columns={"Top-1 Predicted Label": "class_p_r"})
 df_p_r = df_p_r.rename(columns={"Top-1 Confidence Score": "score_p_r"})
@@ -47,20 +50,32 @@ df_merged = (
 )
 
 
-class_name = "copepoda<maxillopoda"
-# class_name = "fiber<detritus"
-# class_name = "eumalacostraca"
-df2_filtered = df_p_r.merge(
-    df_e_f[df_e_f["class"] == class_name][["image_name"]],
-    on="image_name",
-    how="inner"
+# Stage 2 merge score ecotaxa as well
+path_api = path_root + r"\ecotaxa_sample_d_export_api.csv"
+df_api = pd.read_csv(path_api)
+
+
+df_api = df_api.rename(columns={"obj.classif_auto_score": "score_e_f"})
+df_api = df_api.rename(columns={"obj.orig_id": "object_id"})
+
+df_merged = (
+    df_merged
+    .merge(
+        df_api[['object_id', 'score_e_f']],
+        on='object_id',
+        how='left'
+    )
 )
 
-summary = df2_filtered.groupby('class').size().reset_index(name='count')
-print(summary)
 
-df2_filtered.to_csv(out_dir)
-df1=1
+df_merged.to_csv(out_dir, index=False)
+
+unique_labels = pd.DataFrame(sorted(df_merged['class_e_f'].unique()))
+unique_labels.to_csv(path_root + r"\class_unique_e.csv", index=False)
+
+
+df_merged.to_csv(out_dir, index=False)
+
 
 
 
