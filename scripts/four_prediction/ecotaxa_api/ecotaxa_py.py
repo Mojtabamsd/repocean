@@ -2,8 +2,9 @@
 Minimal EcoTaxa API client using only `requests`.
 
 Logs in, resolves a sample's textual name (orig_id) to its internal numeric
-id, pulls all object metadata (incl. taxonomic classification) for that
-sample, and saves it to a CSV file.
+id, pulls object metadata (incl. taxonomic classification) for that sample
+-- optionally restricted server-side to a chosen list of taxon labels -- and
+saves it to a CSV file.
 
 EcoTaxa API base: https://ecotaxa.obs-vlfr.fr/api
 Live Swagger docs (good for double-checking field names / payloads):
@@ -12,6 +13,7 @@ https://ecotaxa.obs-vlfr.fr/api/docs
 
 import csv
 from typing import Optional
+import os
 
 import requests
 
@@ -108,6 +110,71 @@ def find_sample_id(token: str, project_id: int, orig_id: str) -> int:
     return sample_id
 
 
+def search_taxa_by_name(token: str, name: str, project_id=None):
+    """
+    GET /taxon_set/search -> search the (global) taxonomy tree by name.
+
+    This is a small, lightweight call -- it searches the taxonomy
+    dictionary itself, NOT project objects -- so it never downloads any
+    object/image data. Passing project_id makes taxa already used in that
+    project come first in the results (and flagged via 'pr'), but it does
+    NOT restrict the search to that project's taxa only.
+
+    Returns a list of dicts shaped like TaxaSearchRsp:
+        {"id": 12345, "text": "larvae<Ceriantharia", "pr": 1, "renm_id": None}
+    """
+    headers = {"Authorization": f"Bearer {token}"}
+    params = {"query": name}
+    if project_id is not None:
+        params["project_id"] = project_id
+    resp = requests.get(
+        f"{BASE_URL}/taxon_set/search",
+        headers=headers,
+        params=params,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def resolve_taxon_ids(token: str, project_id: int, labels_to_extract: list) -> list:
+    """
+    Resolve a list of EXACT taxon display names (e.g. 'larvae<Ceriantharia')
+    to their numeric classif_id, using the taxonomy name search endpoint.
+    One lightweight request per label -- still nothing object/image related
+    is ever downloaded.
+    """
+    resolved, missing, ambiguous = [], [], []
+
+    for label in labels_to_extract:
+        matches = search_taxa_by_name(token, label, project_id=project_id)
+        exact = [m for m in matches if m.get("text") == label]
+
+        if not exact:
+            missing.append(label)
+            continue
+        if len(exact) > 1:
+            preferred = [m for m in exact if m.get("pr") == 1]
+            chosen = (preferred or exact)[0]
+            ambiguous.append((label, [m["id"] for m in exact]))
+        else:
+            chosen = exact[0]
+
+        resolved.append(chosen["id"])
+
+    if ambiguous:
+        for label, ids in ambiguous:
+            print(f"Warning: label {label!r} matched multiple taxon ids {ids}, used one of "
+                  f"them (preferring the one already used in project {project_id} if any).")
+
+    if missing:
+        raise ValueError(
+            f"Could not find an exact taxon name match for: {missing}. "
+            f"Check spelling/case -- names must match the EcoTaxa display "
+            f"name exactly (e.g. 'larvae<Ceriantharia')."
+        )
+    return resolved
+
+
 def get_object_set(
     token: str,
     project_id: int,
@@ -123,8 +190,11 @@ def get_object_set(
     `fields` is a comma-separated list of columns, e.g.:
         "obj.objid,obj.orig_id,obj.classif_qual,txo.display_name,sam.orig_id"
 
-    `project_filters` is sent as the JSON request body, e.g.
-        {"samples": "12345"}   # comma-separated numeric sample ids
+    `project_filters` is sent as the JSON request body. This is where ALL
+    filtering happens server-side, e.g.:
+        {"samples": "12345,12346"}                      # restrict to samples
+        {"taxo": "5821,6003"}                            # restrict to taxa (classif_id)
+        {"samples": "12345", "taxo": "5821,6003"}        # both combined (AND)
     Pass {} for "no filter" = all objects in the project.
 
     Response (ObjectSetQueryRsp) looks like:
@@ -161,7 +231,13 @@ def fetch_all_objects(
     project_filters: dict,
     page_size: int = 2000,
 ):
-    """Page through get_object_set until every matching object is fetched."""
+    """Page through get_object_set until every matching object is fetched.
+
+    Because filtering (samples, taxa, or both) is applied in
+    `project_filters` and sent to the server on every page request, only
+    the objects that actually match come back -- nothing unwanted is ever
+    downloaded or held in memory.
+    """
     all_ids, all_details = [], []
     start = 0
     while True:
@@ -185,12 +261,12 @@ def fetch_all_objects(
 
     return all_ids, all_details
 
-
 if __name__ == "__main__":
-    USERNAME = "masoudi.m1991@gmail.com"
-    PASSWORD = "1234561qaz"
-    PROJECT_ID = 19171
-    OUT_PATH = r'C:\alr4\ai_predict\ai_predict_all'
+    # USERNAME = os.environ["ECOTAXA_USERNAME"]
+    # PASSWORD = os.environ["ECOTAXA_PASSWORD"]
+    PROJECT_ID = 20066   # uvp6_REF learning set
+    # PROJECT_ID = 19171 # uvp6_ctd learning set
+    OUT_PATH = r'C:\alr4\ai_predict\ai_predict_d'
 
     # Choose how to select samples:
     #   "single" -> one exact sample, matched by full orig_id
@@ -200,7 +276,20 @@ if __name__ == "__main__":
     # MODE = "single"
     SAMPLE_ORIG_ID = "ALR004_20240609_0008_0002_d0002"   # used when MODE == "single"
     SAMPLE_LAST_TOKEN_PREFIX = "d"                        # used when MODE == "prefix"
-    OUTPUT_CSV = OUT_PATH + r"\ecotaxa_sample_d_export_api.csv"
+
+    # --- NEW: optional taxon-label filter -----------------------------
+    # Leave as an empty list to keep the old behaviour (all taxa).
+    # If non-empty, only objects classified into one of these EXACT
+    # display names are fetched. This is resolved to classif_id and sent
+    # to the server alongside the sample filter, so the server -- not
+    # your machine -- does the filtering; nothing else is downloaded.
+    LABELS_TO_EXTRACT = ['larvae<Ceriantharia', 'feeding', 'tentacle<larvae']
+    # LABELS_TO_EXTRACT = []  # <- use this to disable taxon filtering
+    # --------------------------------------------------------------------
+
+    OUTPUT_CSV = OUT_PATH + r"\ecotaxa_sample_" \
+                 + str(SAMPLE_LAST_TOKEN_PREFIX) \
+                 +"_export_api_larve.csv"
 
     token = login(USERNAME, PASSWORD)
     print("Logged in, got token.")
@@ -240,11 +329,39 @@ if __name__ == "__main__":
     field_list = fields.split(",")
 
     # "samples" filter takes a comma-separated string of numeric sample ids
-    samples_filter = ",".join(str(sid) for sid in sample_ids)
+    project_filters = {"samples": ",".join(str(sid) for sid in sample_ids)}
+
+    # --- NEW: fold the taxon filter into the SAME server-side request ---
+    if LABELS_TO_EXTRACT:
+        taxon_ids = resolve_taxon_ids(token, PROJECT_ID, LABELS_TO_EXTRACT)
+        print(f"\nResolved labels {LABELS_TO_EXTRACT} -> classif_ids {taxon_ids}")
+        project_filters["taxo"] = ",".join(str(t) for t in taxon_ids)
+    # ----------------------------------------------------------------------
+
     object_ids, details = fetch_all_objects(
-        token, PROJECT_ID, fields, project_filters={"samples": samples_filter}
+        token, PROJECT_ID, fields, project_filters=project_filters
     )
-    print(f"\nFetched {len(object_ids)} objects for {len(sample_ids)} sample(s)")
+    print(f"\nFetched {len(object_ids)} objects for {len(sample_ids)} sample(s)"
+          + (f" restricted to taxa {LABELS_TO_EXTRACT}" if LABELS_TO_EXTRACT else ""))
+
+    # --- NEW: optional simple post-filter, keep only a given classif_qual --
+    # e.g. only_validated = 'V' keeps only validated objects ('V').
+    # Other EcoTaxa qualifications: 'P' predicted, 'D' dubious.
+    # Leave as None/'' to keep everything (old behaviour).
+    only_validated = 'V'
+    # only_validated = None  # <- use this to disable the filter
+    # ------------------------------------------------------------------------
+
+    if only_validated:
+        qual_idx = field_list.index("obj.classif_qual")
+        filtered = [
+            (obj_id, row) for obj_id, row in zip(object_ids, details)
+            if row[qual_idx] == only_validated
+        ]
+        print(f"Keeping only obj.classif_qual == {only_validated!r}: "
+              f"{len(filtered)} of {len(object_ids)} objects.")
+        object_ids = [x[0] for x in filtered]
+        details = [x[1] for x in filtered]
 
     header = ["objid"] + field_list
     with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
@@ -253,4 +370,4 @@ if __name__ == "__main__":
         for obj_id, row in zip(object_ids, details):
             writer.writerow([obj_id] + row)
 
-    print(f"Saved to {OUTPUT_CSV}")
+    print(f"Saved {len(object_ids)} objects to {OUTPUT_CSV}")
