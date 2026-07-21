@@ -474,8 +474,6 @@ def run_geometry_summary(
             }
         )
 
-    df = pd.DataFrame(rows).sort_values(["run_id", "group_id"]).reset_index(drop=True)
-
     # -------------------------------------------------
     # NMDS from deployment label-count vectors
     # -------------------------------------------------
