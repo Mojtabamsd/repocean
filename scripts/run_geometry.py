@@ -8,9 +8,11 @@ def main():
     ap.add_argument("--out_dir", required=True, help="Where to write CSVs")
     ap.add_argument("--group_mode", choices=["run", "meta"], default="run")
     ap.add_argument("--group_col", default="sample_id")
+    ap.add_argument("--group_col_source", default="meta")
     ap.add_argument("--depth_bin_size", default=10)
     ap.add_argument("--profile_col", default="sample_id")
     ap.add_argument("--sample_per_group", type=int, default=2000)
+    ap.add_argument("--n_bootstrap", type=int, default=20)
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
@@ -19,9 +21,11 @@ def main():
         out_dir=args.out_dir,
         group_mode=args.group_mode,
         group_col=args.group_col,
+        group_col_source=args.group_col_source,
         depth_bin_size=args.depth_bin_size,
         profile_col=args.profile_col,
         sample_per_group=args.sample_per_group,
+        n_bootstrap=args.n_bootstrap,
         seed=args.seed,
     )
     print(df)

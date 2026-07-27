@@ -325,6 +325,7 @@ def run_geometry_summary(
     out_dir: str,
     group_mode: str = "run",          # "run" | "meta"
     group_col: str = "sample_id",     # used when group_mode == "meta", sample_id or object_depth_min
+    group_col_source: str = "meta",  # "pred" | "meta"
     depth_bin_size: float | int | None = None,
     profile_col: str = "sample_id",
     sample_per_group: int = 2000,
@@ -375,6 +376,7 @@ def run_geometry_summary(
         parent_dir=parent_dir,
         mode="run" if group_mode == "run" else "meta",
         group_col=group_col,
+        group_col_source=group_col_source,
         depth_bin_size=depth_bin_size,
         profile_col=profile_col,
     )
