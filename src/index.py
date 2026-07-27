@@ -92,6 +92,41 @@ def _load_pred_name_to_pos(preds_path: str | Path, name_col: str | None = None) 
     return name_to_pos
 
 
+def _load_pred_name_map(
+    preds_path: str | Path,
+    extra_col: str | None = None,
+    name_col: str | None = None,
+) -> tuple[dict[str, int], dict[str, object] | None]:
+    """
+    Same as _load_pred_name_to_pos, but can ALSO pull an extra column's value
+    per image name in a single CSV read (used for group_col_source="pred").
+
+    Returns (name_to_pos, name_to_extra). name_to_extra is None if extra_col
+    is None or not present in the CSV.
+    """
+    df = pd.read_csv(preds_path)
+    if name_col is None:
+        for col in ("image_name", "image", "Image Name", "file_name", "img_name"):
+            if col in df.columns:
+                name_col = col
+                break
+        else:
+            name_col = df.columns[0]
+
+    names = df[name_col].astype(str).str.replace("\\", "/", regex=False)
+
+    name_to_pos: dict[str, int] = {}
+    name_to_extra: dict[str, object] | None = {} if (extra_col and extra_col in df.columns) else None
+
+    for pos, n in enumerate(names):
+        if n not in name_to_pos:
+            name_to_pos[n] = pos
+            if name_to_extra is not None:
+                name_to_extra[n] = df[extra_col].iloc[pos]
+
+    return name_to_pos, name_to_extra
+
+
 def _aligned_h5_pred_indices(features_path, preds_path) -> tuple[np.ndarray, np.ndarray]:
     """
     Returns (h5_idx, pred_idx) parallel arrays for images present in BOTH
@@ -115,6 +150,7 @@ def build_group_index(
     parent_dir: str | Path,
     mode: Literal["run", "meta"] = "run",
     group_col: str = "sample_id",
+    group_col_source: Literal["meta", "pred"] = "meta",
     drop_empty: bool = True,
     depth_bin_size: float | int | None = None,
     profile_col: str = "sample_id",
@@ -122,8 +158,15 @@ def build_group_index(
     """
     Higher-level index that can return:
       - mode="run": one group per run (compatible with build_run_index)
-      - mode="meta": within each run, one group per metadata value
-                     in column `group_col` (e.g. sample_id, station, etc.)
+      - mode="meta": within each run, one group per value in column `group_col`
+                     (e.g. sample_id, station, object_depth_min, ...)
+
+    group_col_source controls WHERE `group_col` is read from:
+      - "meta" (default, unchanged behavior): `group_col` is a column in the
+        metadata file (e.g. sample_id, object_depth_min).
+      - "pred": `group_col` is a column in the predictions CSV instead — use
+        this when the predictions CSV is a curated subsample with its own
+        group/subsample-name column that doesn't exist in metadata.
 
     Returned columns:
       - run_id
@@ -134,6 +177,7 @@ def build_group_index(
       - model_cfg
       - run_cfg
       - indices         (np.ndarray of H5 row indices for this group; None for mode="run")
+      - pred_indices    (np.ndarray of predictions-CSV row indices for this group)
     """
     runs = build_run_index(parent_dir)
     if runs.empty:
@@ -169,11 +213,14 @@ def build_group_index(
         if not input_path:
             continue
 
-        need_cols = [group_col, profile_col, "sample_id", "object_lat", "object_lon"]
+        if group_col_source == "meta":
+            need_cols = [group_col, profile_col, "sample_id", "object_lat", "object_lon"]
+        else:
+            need_cols = [profile_col, "sample_id", "object_lat", "object_lon"]
         need_cols = list(dict.fromkeys(need_cols))  # keep order, remove duplicates
 
         numeric_cols = ["object_lat", "object_lon"]
-        if group_col == "object_depth_min":
+        if group_col_source == "meta" and group_col == "object_depth_min":
             numeric_cols.append("object_depth_min")
 
         meta = load_run_metadata(
@@ -181,12 +228,23 @@ def build_group_index(
             cols=need_cols,
             numeric_cols=numeric_cols,
         )
-        if meta.empty or group_col not in meta.columns:
+        if meta.empty:
+            continue
+        if group_col_source == "meta" and group_col not in meta.columns:
             continue
 
         with open_h5(features_path) as h5f:
             name_to_idx = _build_name_to_index(h5f)
-        name_to_predpos = _load_pred_name_to_pos(r["preds"])
+
+        # NEW: also pull group_col values from the preds CSV when requested,
+        # in the same pass that builds the name->pred-row-position map.
+        name_to_predpos, name_to_predgroup = _load_pred_name_map(
+            r["preds"],
+            extra_col=group_col if group_col_source == "pred" else None,
+        )
+        if group_col_source == "pred" and name_to_predgroup is None:
+            # group_col isn't a column in this run's predictions CSV — skip run
+            continue
 
         idxs, pred_idxs, gids, profiles, depth_bins, lats, lons = [], [], [], [], [], [], []
 
@@ -200,10 +258,16 @@ def build_group_index(
             if p is None:
                 continue
 
-            raw_gid = row.get(group_col, None)
+            # NEW: pick group value from pred CSV or metadata depending on flag
+            if group_col_source == "pred":
+                raw_gid = name_to_predgroup.get(img, None)
+                if raw_gid is None:
+                    continue
+            else:
+                raw_gid = row.get(group_col, None)
 
-            # special case: group by profile + depth bin
-            if group_col == "object_depth_min" and depth_bin_size is not None:
+            # special case: group by profile + depth bin (meta-only, unchanged)
+            if group_col_source == "meta" and group_col == "object_depth_min" and depth_bin_size is not None:
                 prof = row.get(profile_col, row.get("sample_id", None))
                 depth_val = pd.to_numeric(pd.Series([raw_gid]), errors="coerce").iloc[0]
                 depth_bin = _format_depth_bin(depth_val, depth_bin_size)
@@ -232,6 +296,7 @@ def build_group_index(
                     "model_cfg": r["model_cfg"],
                     "run_cfg": run_cfg_path,
                     "indices": np.array([], dtype=np.int64),
+                    "pred_indices": np.array([], dtype=np.int64),
                     "group_lat": np.nan,
                     "group_lon": np.nan,
                     "n_images_in_group": 0,
@@ -255,7 +320,6 @@ def build_group_index(
             if grp_idx.size == 0 and drop_empty:
                 continue
 
-            # ✅ group-level mean location (safe if missing)
             glat = float(sub["lat"].mean()) if sub["lat"].notna().any() else np.nan
             glon = float(sub["lon"].mean()) if sub["lon"].notna().any() else np.nan
 
@@ -277,7 +341,7 @@ def build_group_index(
             })
 
     if not rows:
-        return pd.DataFrame(columns=list(runs.columns) + ["group_id", "indices", "group_lat", "group_lon", "n_images_in_group"])
+        return pd.DataFrame(columns=list(runs.columns) + ["group_id", "indices", "pred_indices", "group_lat", "group_lon", "n_images_in_group"])
 
     out = pd.DataFrame(rows)
     out = out.sort_values(["run_id", "group_id"], na_position="last").reset_index(drop=True)
