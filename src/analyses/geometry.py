@@ -206,6 +206,120 @@ def _find_predictions_csv(features_path: str | Path) -> Path:
     )
 
 
+def _compute_geometry_metrics(X: np.ndarray, pair_samples: int, rng: np.random.Generator) -> dict:
+    """
+    Compute the sphere-aware geometry metrics for a single (fixed-size) sample X.
+    Pulled out into a helper so it can be called once per bootstrap trial and
+    averaged, without duplicating logic.
+    """
+    n = int(X.shape[0])
+
+    # -----------------------
+    # Basic norm sanity checks
+    # -----------------------
+    norms = np.linalg.norm(X, axis=1)
+    mean_norm = float(norms.mean())
+    std_norm = float(norms.std())
+
+    # --------------------------------------------
+    # Sphere-aware: centroid + cosine-to-centroid
+    # --------------------------------------------
+    mu = X.mean(axis=0)
+    mu_norm = float(np.linalg.norm(mu))
+    centroid_norm = mu_norm
+
+    if mu_norm > 0:
+        mu_hat = mu / mu_norm
+        cos_to_centroid = X @ mu_hat
+        cos_mean = float(cos_to_centroid.mean())
+        cos_std = float(cos_to_centroid.std())
+        cos_p10 = float(np.percentile(cos_to_centroid, 10))
+        cos_p50 = float(np.percentile(cos_to_centroid, 50))
+        cos_p90 = float(np.percentile(cos_to_centroid, 90))
+    else:
+        cos_mean = cos_std = cos_p10 = cos_p50 = cos_p90 = float("nan")
+
+    # --------------------------------------------
+    # Pairwise cosine similarity (random pairs)
+    # --------------------------------------------
+    if n >= 2 and pair_samples > 0:
+        m = min(pair_samples, n * (n - 1) // 2)
+        i = rng.integers(0, n, size=m, dtype=np.int64)
+        j = rng.integers(0, n, size=m, dtype=np.int64)
+
+        bad = (i == j)
+        if np.any(bad):
+            j[bad] = (j[bad] + 1) % n
+
+        pair_cos = np.einsum("ij,ij->i", X[i], X[j])
+        pair_cos_mean = float(pair_cos.mean())
+        pair_cos_p10 = float(np.percentile(pair_cos, 10))
+        pair_cos_p50 = float(np.percentile(pair_cos, 50))
+        pair_cos_p90 = float(np.percentile(pair_cos, 90))
+    else:
+        pair_cos_mean = pair_cos_p10 = pair_cos_p50 = pair_cos_p90 = float("nan")
+
+    # --------------------------------------------
+    # Intrinsic dims + covariance summaries
+    # --------------------------------------------
+    dim90, dim95 = _intrinsic_dim_pca(X)
+
+    if n >= 2:
+        Xc = X - mu
+        C = (Xc.T @ Xc) / max(n - 1, 1)
+        evals = np.linalg.eigvalsh(C)
+        evals = np.clip(evals, 0.0, np.inf)
+        trace_cov = float(evals.sum())
+
+        s1 = float(evals.sum())
+        s2 = float((evals * evals).sum())
+        eff_rank = float((s1 * s1) / s2) if (s1 > 0 and s2 > 0) else 0.0
+    else:
+        trace_cov = 0.0
+        eff_rank = 0.0
+
+    return {
+        "mean_norm": mean_norm,
+        "std_norm": std_norm,
+        "centroid_norm": centroid_norm,
+        "cos_mean": cos_mean,
+        "cos_std": cos_std,
+        "cos_p10": cos_p10,
+        "cos_p50": cos_p50,
+        "cos_p90": cos_p90,
+        "pair_cos_mean": pair_cos_mean,
+        "pair_cos_p10": pair_cos_p10,
+        "pair_cos_p50": pair_cos_p50,
+        "pair_cos_p90": pair_cos_p90,
+        "trace_cov": trace_cov,
+        "eff_rank": eff_rank,
+        "pca_dim_90": dim90,
+        "pca_dim_95": dim95,
+    }
+
+
+def _average_trial_metrics(trial_metrics: list[dict]) -> dict:
+    """
+    Average numeric geometry metrics across bootstrap trials.
+    Integer-ish fields (pca_dim_90/95) are averaged then rounded to int,
+    matching their original "count of components" meaning.
+    """
+    keys = trial_metrics[0].keys()
+    avg = {}
+    for key in keys:
+        vals = [m[key] for m in trial_metrics if np.isfinite(m[key])]
+        if not vals:
+            avg[key] = float("nan")
+        else:
+            avg[key] = float(np.mean(vals))
+
+    for int_key in ("pca_dim_90", "pca_dim_95"):
+        if np.isfinite(avg[int_key]):
+            avg[int_key] = int(round(avg[int_key]))
+
+    return avg
+
+
 def run_geometry_summary(
     parent_dir: str,
     out_dir: str,
@@ -214,6 +328,7 @@ def run_geometry_summary(
     depth_bin_size: float | int | None = None,
     profile_col: str = "sample_id",
     sample_per_group: int = 2000,
+    n_bootstrap: int = 20,            # number of subsample trials to average when num_rows > sample_per_group
     seed: int = 42,
     pair_samples: int = 5000,
     pred_label_col: str = "Top-1 Predicted Label",
@@ -223,6 +338,19 @@ def run_geometry_summary(
 ) -> pd.DataFrame:
     """
     Geometry + sphere-aware summary of feature space per group (run or profile/meta).
+
+    Sample-size handling:
+        - If a group has num_rows <= sample_per_group: use all rows, single pass
+          (n_trials = 1).
+        - If a group has num_rows > sample_per_group: draw `n_bootstrap`
+          independent random subsamples of size `sample_per_group`, compute
+          geometry metrics on each, and average them.
+
+        This means every group's geometry metrics are computed on at most
+        `sample_per_group` points, which removes sample-size as a confound
+        for groups above that threshold, while groups below it just use what
+        they have (documented via `sampled` / `n_bootstrap_trials` columns in
+        the output so you can filter/inspect afterwards).
 
     Additional outputs:
         - centroid cosine similarity between groups
@@ -347,92 +475,47 @@ def run_geometry_summary(
             tax_exp_shannon = np.nan
             tax_num_classes_present = np.nan
 
-        # -----------------------
-        # Sample filtered rows for geometry
-        # -----------------------
+        # -----------------------------------------------------
+        # Sample filtered rows for geometry (fixed-size + bootstrap)
+        # -----------------------------------------------------
         k = min(sample_per_group, num_rows)
         if k <= 0:
             continue
 
-        rel_idx = sample_indices_uniform(num_rows, k, rng)
-        sel_idx = np.sort(idx_all[rel_idx])
+        n_trials = n_bootstrap if num_rows > sample_per_group else 1
 
-        with open_h5(features_path) as h5f:
-            part = read_rows_by_indices(h5f, sel_idx)
-            X = part["features"]
+        trial_metrics = []
+        last_mu_hat = None  # centroid direction used for the cross-group cosine matrix
 
-        if X.size == 0:
+        for _t in range(n_trials):
+            rel_idx = sample_indices_uniform(num_rows, k, rng)
+            sel_idx = np.sort(idx_all[rel_idx])
+
+            with open_h5(features_path) as h5f:
+                part = read_rows_by_indices(h5f, sel_idx)
+                X = part["features"]
+
+            if X.size == 0:
+                continue
+
+            m = _compute_geometry_metrics(X, pair_samples=pair_samples, rng=rng)
+            trial_metrics.append(m)
+
+            # centroid direction from the last trial (or the only trial when n_trials == 1)
+            mu = X.mean(axis=0)
+            mu_norm = np.linalg.norm(mu)
+            if mu_norm > 0:
+                last_mu_hat = (mu / mu_norm).astype(np.float32)
+
+        if not trial_metrics:
             continue
 
-        n = int(X.shape[0])
-        d = int(d)
+        geo = _average_trial_metrics(trial_metrics)
+        n = k  # effective sample size used per trial
 
-        # -----------------------
-        # Basic norm sanity checks
-        # -----------------------
-        norms = np.linalg.norm(X, axis=1)
-        mean_norm = float(norms.mean())
-        std_norm = float(norms.std())
-
-        # --------------------------------------------
-        # Sphere-aware: centroid + cosine-to-centroid
-        # --------------------------------------------
-        mu = X.mean(axis=0)
-        mu_norm = float(np.linalg.norm(mu))
-        centroid_norm = mu_norm
-
-        if mu_norm > 0:
-            mu_hat = mu / mu_norm
-            cos_to_centroid = X @ mu_hat
-            cos_mean = float(cos_to_centroid.mean())
-            cos_std = float(cos_to_centroid.std())
-            cos_p10 = float(np.percentile(cos_to_centroid, 10))
-            cos_p50 = float(np.percentile(cos_to_centroid, 50))
-            cos_p90 = float(np.percentile(cos_to_centroid, 90))
-
-            centroid_dirs.append(mu_hat.astype(np.float32))
+        if last_mu_hat is not None:
+            centroid_dirs.append(last_mu_hat)
             centroid_keys.append((run_id, group_id))
-        else:
-            cos_mean = cos_std = cos_p10 = cos_p50 = cos_p90 = float("nan")
-
-        # --------------------------------------------
-        # Pairwise cosine similarity (random pairs)
-        # --------------------------------------------
-        if n >= 2 and pair_samples > 0:
-            m = min(pair_samples, n * (n - 1) // 2)
-            i = rng.integers(0, n, size=m, dtype=np.int64)
-            j = rng.integers(0, n, size=m, dtype=np.int64)
-
-            bad = (i == j)
-            if np.any(bad):
-                j[bad] = (j[bad] + 1) % n
-
-            pair_cos = np.einsum("ij,ij->i", X[i], X[j])
-            pair_cos_mean = float(pair_cos.mean())
-            pair_cos_p10 = float(np.percentile(pair_cos, 10))
-            pair_cos_p50 = float(np.percentile(pair_cos, 50))
-            pair_cos_p90 = float(np.percentile(pair_cos, 90))
-        else:
-            pair_cos_mean = pair_cos_p10 = pair_cos_p50 = pair_cos_p90 = float("nan")
-
-        # --------------------------------------------
-        # Intrinsic dims + covariance summaries
-        # --------------------------------------------
-        dim90, dim95 = _intrinsic_dim_pca(X)
-
-        if n >= 2:
-            Xc = X - mu
-            C = (Xc.T @ Xc) / max(n - 1, 1)
-            evals = np.linalg.eigvalsh(C)
-            evals = np.clip(evals, 0.0, np.inf)
-            trace_cov = float(evals.sum())
-
-            s1 = float(evals.sum())
-            s2 = float((evals * evals).sum())
-            eff_rank = float((s1 * s1) / s2) if (s1 > 0 and s2 > 0) else 0.0
-        else:
-            trace_cov = 0.0
-            eff_rank = 0.0
 
         rows.append(
             {
@@ -441,6 +524,7 @@ def run_geometry_summary(
                 "num_rows": num_rows,
                 "feat_dim": d,
                 "sampled": n,
+                "n_bootstrap_trials": len(trial_metrics),
 
                 "pred_num_classes_present": int(pred_num_classes_present),
                 "shannon": round(pred_shannon, 6) if np.isfinite(pred_shannon) else pred_shannon,
@@ -452,25 +536,25 @@ def run_geometry_summary(
                 "tax_shannon": round(tax_shannon, 6) if np.isfinite(tax_shannon) else tax_shannon,
                 "tax_exp_shannon": round(tax_exp_shannon, 6) if np.isfinite(tax_exp_shannon) else tax_exp_shannon,
 
-                "mean_norm": round(mean_norm, 6),
-                "std_norm": round(std_norm, 6),
+                "mean_norm": round(geo["mean_norm"], 6),
+                "std_norm": round(geo["std_norm"], 6),
 
-                "centroid_norm": round(centroid_norm, 6),
-                "cos_mean": round(cos_mean, 6),
-                "cos_std": round(cos_std, 6),
-                "cos_p10": round(cos_p10, 6),
-                "cos_p50": round(cos_p50, 6),
-                "cos_p90": round(cos_p90, 6),
+                "centroid_norm": round(geo["centroid_norm"], 6),
+                "cos_mean": round(geo["cos_mean"], 6),
+                "cos_std": round(geo["cos_std"], 6),
+                "cos_p10": round(geo["cos_p10"], 6),
+                "cos_p50": round(geo["cos_p50"], 6),
+                "cos_p90": round(geo["cos_p90"], 6),
 
-                "pair_cos_mean": round(pair_cos_mean, 6) if np.isfinite(pair_cos_mean) else pair_cos_mean,
-                "pair_cos_p10": round(pair_cos_p10, 6) if np.isfinite(pair_cos_p10) else pair_cos_p10,
-                "pair_cos_p50": round(pair_cos_p50, 6) if np.isfinite(pair_cos_p50) else pair_cos_p50,
-                "pair_cos_p90": round(pair_cos_p90, 6) if np.isfinite(pair_cos_p90) else pair_cos_p90,
+                "pair_cos_mean": round(geo["pair_cos_mean"], 6) if np.isfinite(geo["pair_cos_mean"]) else geo["pair_cos_mean"],
+                "pair_cos_p10": round(geo["pair_cos_p10"], 6) if np.isfinite(geo["pair_cos_p10"]) else geo["pair_cos_p10"],
+                "pair_cos_p50": round(geo["pair_cos_p50"], 6) if np.isfinite(geo["pair_cos_p50"]) else geo["pair_cos_p50"],
+                "pair_cos_p90": round(geo["pair_cos_p90"], 6) if np.isfinite(geo["pair_cos_p90"]) else geo["pair_cos_p90"],
 
-                "trace_cov": round(trace_cov, 6),
-                "eff_rank": round(eff_rank, 6),
-                "pca_dim_90": int(dim90),
-                "pca_dim_95": int(dim95),
+                "trace_cov": round(geo["trace_cov"], 6),
+                "eff_rank": round(geo["eff_rank"], 6),
+                "pca_dim_90": geo["pca_dim_90"],
+                "pca_dim_95": geo["pca_dim_95"],
             }
         )
 
