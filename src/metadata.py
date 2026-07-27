@@ -41,26 +41,26 @@ def _normalize_image_name(x: str) -> str:
 
 def _shorten_sample_id(raw: str) -> str:
     """
-    Shorten long sample_id strings by keeping only the 3rd chunk.
+    Shorten long sample_id strings.
 
-    Example:
-      'alr004_20251001_0012_0001_d0001' -> '0012'
-
-    Logic:
-      - split on '_' (after str() conversion)
-      - if there are at least 3 chunks, return chunks[2]
-      - otherwise return the original string
+    - 'alr004_20251001_0012_0001_d0001' -> '0012'   (keep 3rd chunk, zero-padded)
+    - 'dy180_CTD040S_d'                 -> 'CTD040S_d' (drop leading prefix only)
     """
     if raw is None:
         return ""
     s = str(raw)
     parts = s.split("_")
+
+    if s.startswith("dy180_"):
+        return s.split("_", 1)[1]
+
     if len(parts) >= 3:
         val = parts[2]
         try:
-            return f"{int(val):04d}"  # enforce 4-digit zero padding
+            return f"{int(val):04d}"
         except ValueError:
-            return val  # fallback if not numeric
+            return val
+
     return s
 
 
@@ -166,6 +166,7 @@ def load_run_metadata(
         # Normalise filename
         sub.rename(columns={name_col: "image_name"}, inplace=True)
         sub["image_name"] = sub["image_name"].apply(_normalize_image_name)
+        # sub['image_name'] = sub['image_name'].str.split('/').str[-1]
 
         # Rename actual → canonical
         for canon, actual in canon_to_actual.items():
