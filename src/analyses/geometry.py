@@ -356,8 +356,14 @@ def run_geometry_summary(
         - centroid cosine similarity between groups
         - prediction-label Shannon entropy from predictions_with_top3_scores.csv
 
-    Assumption:
-        predictions_with_top3_scores.csv row order matches feature row order.
+    Index alignment:
+        `build_group_index` returns two PARALLEL arrays per group:
+          - "indices"      -> row positions in the H5 feature file
+          - "pred_indices" -> row positions in the predictions CSV
+        for the SAME set of images, matched by image name. They are NOT
+        assumed to be numerically equal, since the CSV and H5 may not have
+        identical row order or identical row counts. Always use "indices"
+        to read from the H5 file and "pred_indices" to read from pred_df.
     """
     rng = np.random.default_rng(seed)
     exclude_labels = set(exclude_labels or [])
@@ -383,66 +389,56 @@ def run_geometry_summary(
     pred_count_rows = []
     tax_count_rows = []
 
-    # optional cache so each run CSV is only loaded once
+    # cache so each run's predictions CSV is only loaded once
     pred_cache: dict[str, pd.DataFrame] = {}
 
     for _, g in groups.iterrows():
         run_id = g["run_id"]
         features_path = g["features"]
+        group_id = run_id if group_mode == "run" else g["group_id"]
 
-        # Decide group_id + which indices belong to this group
-        if group_mode == "run":
-            group_id = run_id
-            with open_h5(features_path) as h5f:
-                n_total, d = get_h5_shapes(h5f)
-                if n_total == 0:
-                    continue
-                idx_all = np.arange(n_total, dtype=np.int64)
-        else:
-            group_id = g["group_id"]
-            idx_group = g.get("indices", None)
-            if idx_group is None:
-                continue
-            idx_all = np.asarray(idx_group, dtype=np.int64)
-            if idx_all.size == 0:
-                continue
-            with open_h5(features_path) as h5f:
-                n_total, d = get_h5_shapes(h5f)
+        # -----------------------------------------------------
+        # Aligned index pair for this group: H5 positions + CSV positions
+        # -----------------------------------------------------
+        idx_all = np.asarray(g["indices"], dtype=np.int64)
+        pred_idx_all = np.asarray(g["pred_indices"], dtype=np.int64)
+
+        if idx_all.size == 0:
+            continue
+
+        with open_h5(features_path) as h5f:
+            n_total, d = get_h5_shapes(h5f)
 
         # -----------------------
-        # Prediction-label Shannon
+        # Load / cache predictions CSV for this run
         # -----------------------
         if run_id not in pred_cache:
-            pred_csv = _find_predictions_csv(features_path)
-            pred_df = pd.read_csv(pred_csv)
-
+            pred_df = pd.read_csv(g["preds"])
             if pred_label_col not in pred_df.columns:
-                raise KeyError(f"Column '{pred_label_col}' not found in {pred_csv}")
-
+                raise KeyError(f"Column '{pred_label_col}' not found in {g['preds']}")
             pred_cache[run_id] = pred_df
 
         pred_df = pred_cache[run_id]
         has_taxonomist_col = taxonomist_label_col in pred_df.columns
 
-        if len(pred_df) < int(idx_all.max()) + 1:
-            raise ValueError(
-                f"Prediction CSV for run {run_id} has fewer rows ({len(pred_df)}) "
-                f"than needed for max feature index {int(idx_all.max())}."
-            )
+        # No manual bounds-check needed here: pred_idx_all was built by
+        # build_group_index via name-matching against this exact CSV, so
+        # every value is guaranteed to be a valid row position in pred_df.
 
         # -----------------------
         # FILTER INDICES HERE
         # -----------------------
-        pred_labels_full = pred_df.iloc[idx_all][pred_label_col].to_numpy()
+        pred_labels_full = pred_df.iloc[pred_idx_all][pred_label_col].to_numpy()
 
         if has_taxonomist_col:
-            tax_labels_full = pred_df.iloc[idx_all][taxonomist_label_col].to_numpy()
+            tax_labels_full = pred_df.iloc[pred_idx_all][taxonomist_label_col].to_numpy()
         else:
             tax_labels_full = None
 
         if exclude_labels:
             keep_mask = ~pd.Series(pred_labels_full).isin(exclude_labels).to_numpy()
             idx_all = idx_all[keep_mask]
+            pred_idx_all = pred_idx_all[keep_mask]
             pred_labels_full = pred_labels_full[keep_mask]
             if tax_labels_full is not None:
                 tax_labels_full = tax_labels_full[keep_mask]
@@ -489,7 +485,7 @@ def run_geometry_summary(
 
         for _t in range(n_trials):
             rel_idx = sample_indices_uniform(num_rows, k, rng)
-            sel_idx = np.sort(idx_all[rel_idx])
+            sel_idx = np.sort(idx_all[rel_idx])   # H5 indices only — correct space for reading features
 
             with open_h5(features_path) as h5f:
                 part = read_rows_by_indices(h5f, sel_idx)
