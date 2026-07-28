@@ -13,7 +13,8 @@ from src.stream import open_h5
 REQUIRED = {
     "features": "features_*.h5",
     # "features": "features_contrastive20250326162033.h5",
-    "preds": "predictions_with_top3_scores.csv",
+    # "preds": "predictions_with_top3_scores.csv",
+    "preds": "tier1_synthetic_profile.csv",
     # "features": "features_contrastive20250326162033_s.h5",
     # "preds": "predictions_with_top3_scores_s.csv",
     "model_cfg": "model_config.yaml",

@@ -140,6 +140,11 @@ def assemble_profile(full_df, category_counts: dict, profile_id: str, scenario_n
     prof["synthetic_profile_id"] = profile_id
     prof["scenario_name"] = scenario_name
     prof["original_sample_id"] = prof["sample_id"]
+    # `sample_id` is overwritten here to be the grouping key you'll actually
+    # use downstream: real source profile + synthetic scenario/profile.
+    # `original_sample_id` preserves the untouched real sample_id for
+    # traceability back to the source profile.
+    prof["sample_id"] = prof["original_sample_id"].astype(str) + "_" + prof["synthetic_profile_id"].astype(str)
     return prof
 
 
@@ -152,13 +157,13 @@ def scenario_null_control(full_df, base_categories: dict, n_replicates=2):
     noise floor / null distribution."""
     frames = []
     for i in range(n_replicates):
-        pid = f"null_control_{i+1}"
+        pid = f"null_control_{i + 1}"
         frames.append(assemble_profile(full_df, base_categories, pid, "null_control"))
     return pd.concat(frames, ignore_index=True)
 
 
 def scenario_abundance_bloom(full_df, base_categories: dict, bloom_category: str,
-                              multipliers=(1, 3, 10)):
+                             multipliers=(1, 3, 10)):
     """Same category set every time; one category's count is multiplied
     to simulate a bloom, others held constant."""
     frames = []
@@ -182,7 +187,7 @@ def scenario_composition_swap(full_df, categories_a: dict, categories_b: dict):
 
 
 def scenario_novel_category(full_df, base_categories: dict, novel_category: str,
-                             novel_counts=(0, 5, 20, 60)):
+                            novel_counts=(0, 5, 20, 60)):
     """Baseline composition held fixed; a category absent from the
     baseline (novel_counts[0] == 0) is introduced at increasing
     prevalence in subsequent profiles."""
@@ -208,15 +213,15 @@ if __name__ == "__main__":
     # labels excluded), with decent row counts and profile coverage.
     # Chaetognatha and Thecosomata dropped (noisy labels per manual review).
     CHOSEN_CATEGORIES = [
-        "Copepoda<Maxillopoda",   # 11233 rows, 97.7% profiles - dominant real taxon
-        "Eumalacostraca",         #   438 rows, 81.8% profiles
-        "Limacinidae",            #   307 rows, 77.3% profiles
-        "Hydrozoa",               #   170 rows, 75.0% profiles
-        "Ostracoda",              #   166 rows, 70.5% profiles
-        "Siphonophorae",          #   121 rows, 68.2% profiles
-        "Annelida",               #   146 rows, 68.2% profiles
-        "Acantharia",             #   152 rows, 56.8% profiles
-        "Cydippida",              #    75 rows, 63.6% profiles
+        "Copepoda<Maxillopoda",  # 11233 rows, 97.7% profiles - dominant real taxon
+        "Eumalacostraca",  # 438 rows, 81.8% profiles
+        "Limacinidae",  # 307 rows, 77.3% profiles
+        "Hydrozoa",  # 170 rows, 75.0% profiles
+        "Ostracoda",  # 166 rows, 70.5% profiles
+        "Siphonophorae",  # 121 rows, 68.2% profiles
+        "Annelida",  # 146 rows, 68.2% profiles
+        "Acantharia",  # 152 rows, 56.8% profiles
+        "Cydippida",  # 75 rows, 63.6% profiles
     ]
 
     # Detritus is structurally different from a "rare class" - it's a
@@ -227,8 +232,8 @@ if __name__ == "__main__":
     # Two novel-category candidates at different rarity levels, since
     # "moderately rare newcomer" and "barely-there newcomer" test
     # different sensitivity thresholds.
-    NOVEL_LABEL_MODERATE = "Coelographis"   #  69 rows, 65.9% profiles
-    NOVEL_LABEL_RARE = "Foraminifera"       #  18 rows, 27.3% profiles
+    NOVEL_LABEL_MODERATE = "Coelographis"  # 69 rows, 65.9% profiles
+    NOVEL_LABEL_RARE = "Foraminifera"  # 18 rows, 27.3% profiles
 
     BASE_N_PER_CAT = 20
     base_categories = {c: BASE_N_PER_CAT for c in CHOSEN_CATEGORIES}
@@ -259,17 +264,24 @@ if __name__ == "__main__":
     baseline_without_novel = {k: v for k, v in base_categories.items() if k != NOVEL_LABEL_MODERATE}
     all_scenarios.append(
         scenario_novel_category(full_df, baseline_without_novel, NOVEL_LABEL_MODERATE,
-                                 novel_counts=(0, 5, 20, 60))
+                                novel_counts=(0, 5, 20, 60))
     )
 
     # rare novel category (fewer available rows -> smaller max count)
     baseline_without_rare = {k: v for k, v in base_categories.items() if k != NOVEL_LABEL_RARE}
     all_scenarios.append(
         scenario_novel_category(full_df, baseline_without_rare, NOVEL_LABEL_RARE,
-                                 novel_counts=(0, 3, 8, 15))
+                                novel_counts=(0, 3, 8, 15))
     )
 
     final = pd.concat(all_scenarios, ignore_index=True)
+
+    # `synthetic_profile_id` alone isn't guaranteed unique across scenarios
+    # (e.g. every scenario could in principle reuse names). Build an
+    # explicit, globally unique profile key to group/aggregate metrics on.
+    final["profile_uid"] = final["scenario_name"] + "__" + final["synthetic_profile_id"]
+    uid_map = {uid: i for i, uid in enumerate(final["profile_uid"].unique(), start=1)}
+    final["profile_int_id"] = final["profile_uid"].map(uid_map)
 
     # keep the same columns as predictions_with_top3_scores.csv, plus
     # the bookkeeping columns we added
