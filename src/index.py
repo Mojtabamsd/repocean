@@ -14,7 +14,7 @@ REQUIRED = {
     "features": "features_*.h5",
     # "features": "features_contrastive20250326162033.h5",
     # "preds": "predictions_with_top3_scores.csv",
-    "preds": "tier1_synthetic_profile.csv",
+    "preds": "tier1_synthetic_profiles.csv",
     # "features": "features_contrastive20250326162033_s.h5",
     # "preds": "predictions_with_top3_scores_s.csv",
     "model_cfg": "model_config.yaml",
@@ -76,7 +76,7 @@ def _format_depth_bin(val: float, bin_size: float | int) -> str:
     return f"{lo:03d}-{hi:03d}m"
 
 
-def _load_pred_name_to_pos(preds_path: str | Path, name_col: str | None = None) -> dict[str, int]:
+def _load_pred_name_to_pos(preds_path: str | Path, name_col: str | None = None) -> dict[str, list[int]]:
     df = pd.read_csv(preds_path)
     if name_col is None:
         for col in ("image_name", "image", "Image Name", "file_name", "img_name"):
@@ -86,10 +86,9 @@ def _load_pred_name_to_pos(preds_path: str | Path, name_col: str | None = None) 
         else:
             name_col = df.columns[0]
     names = df[name_col].astype(str).str.replace("\\", "/", regex=False)
-    name_to_pos: dict[str, int] = {}
+    name_to_pos: dict[str, list[int]] = {}
     for pos, n in enumerate(names):
-        if n not in name_to_pos:      # keep first occurrence if dup filenames
-            name_to_pos[n] = pos
+        name_to_pos.setdefault(n, []).append(pos)   # keep ALL occurrences
     return name_to_pos
 
 
@@ -97,14 +96,7 @@ def _load_pred_name_map(
     preds_path: str | Path,
     extra_col: str | None = None,
     name_col: str | None = None,
-) -> tuple[dict[str, int], dict[str, object] | None]:
-    """
-    Same as _load_pred_name_to_pos, but can ALSO pull an extra column's value
-    per image name in a single CSV read (used for group_col_source="pred").
-
-    Returns (name_to_pos, name_to_extra). name_to_extra is None if extra_col
-    is None or not present in the CSV.
-    """
+) -> tuple[dict[str, list[int]], dict[str, list[object]] | None]:
     df = pd.read_csv(preds_path)
     if name_col is None:
         for col in ("image_name", "image", "Image Name", "file_name", "img_name"):
@@ -116,23 +108,18 @@ def _load_pred_name_map(
 
     names = df[name_col].astype(str).str.replace("\\", "/", regex=False)
 
-    name_to_pos: dict[str, int] = {}
-    name_to_extra: dict[str, object] | None = {} if (extra_col and extra_col in df.columns) else None
+    name_to_pos: dict[str, list[int]] = {}
+    name_to_extra: dict[str, list[object]] | None = {} if (extra_col and extra_col in df.columns) else None
 
     for pos, n in enumerate(names):
-        if n not in name_to_pos:
-            name_to_pos[n] = pos
-            if name_to_extra is not None:
-                name_to_extra[n] = df[extra_col].iloc[pos]
+        name_to_pos.setdefault(n, []).append(pos)
+        if name_to_extra is not None:
+            name_to_extra.setdefault(n, []).append(df[extra_col].iloc[pos])
 
     return name_to_pos, name_to_extra
 
 
 def _aligned_h5_pred_indices(features_path, preds_path) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Returns (h5_idx, pred_idx) parallel arrays for images present in BOTH
-    the H5 file and the predictions CSV, sorted by h5_idx.
-    """
     with open_h5(features_path) as h5f:
         name_to_h5idx = _build_name_to_index(h5f)
     name_to_predpos = _load_pred_name_to_pos(preds_path)
@@ -141,7 +128,13 @@ def _aligned_h5_pred_indices(features_path, preds_path) -> tuple[np.ndarray, np.
     if not common:
         return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
 
-    pairs = sorted((name_to_h5idx[n], name_to_predpos[n]) for n in common)
+    pairs = []
+    for n in common:
+        h5i = name_to_h5idx[n]
+        for p in name_to_predpos[n]:
+            pairs.append((h5i, p))
+    pairs.sort()
+
     h5_idx = np.array([p[0] for p in pairs], dtype=np.int64)
     pred_idx = np.array([p[1] for p in pairs], dtype=np.int64)
     return h5_idx, pred_idx
@@ -255,36 +248,35 @@ def build_group_index(
             if i is None:
                 continue
 
-            p = name_to_predpos.get(img)
-            if p is None:
+            p_list = name_to_predpos.get(img)
+            if not p_list:
                 continue
 
-            # NEW: pick group value from pred CSV or metadata depending on flag
             if group_col_source == "pred":
-                raw_gid = name_to_predgroup.get(img, None)
-                if raw_gid is None:
+                raw_gid_list = name_to_predgroup.get(img, None)
+                if not raw_gid_list:
                     continue
             else:
-                raw_gid = row.get(group_col, None)
+                raw_gid_list = [row.get(group_col, None)] * len(p_list)
 
-            # special case: group by profile + depth bin (meta-only, unchanged)
-            if group_col_source == "meta" and group_col == "object_depth_min" and depth_bin_size is not None:
-                prof = row.get(profile_col, row.get("sample_id", None))
-                depth_val = pd.to_numeric(pd.Series([raw_gid]), errors="coerce").iloc[0]
-                depth_bin = _format_depth_bin(depth_val, depth_bin_size)
-                gid = f"{prof}__{depth_bin}"
-            else:
-                prof = row.get(profile_col, row.get("sample_id", None))
-                depth_bin = np.nan
-                gid = raw_gid
+            for p, raw_gid in zip(p_list, raw_gid_list):
+                if group_col_source == "meta" and group_col == "object_depth_min" and depth_bin_size is not None:
+                    prof = row.get(profile_col, row.get("sample_id", None))
+                    depth_val = pd.to_numeric(pd.Series([raw_gid]), errors="coerce").iloc[0]
+                    depth_bin = _format_depth_bin(depth_val, depth_bin_size)
+                    gid = f"{prof}__{depth_bin}"
+                else:
+                    prof = row.get(profile_col, row.get("sample_id", None))
+                    depth_bin = np.nan
+                    gid = raw_gid
 
-            idxs.append(i)
-            pred_idxs.append(p)
-            gids.append(gid)
-            profiles.append(prof)
-            depth_bins.append(depth_bin)
-            lats.append(row.get("object_lat", np.nan))
-            lons.append(row.get("object_lon", np.nan))
+                idxs.append(i)
+                pred_idxs.append(p)
+                gids.append(gid)
+                profiles.append(prof)
+                depth_bins.append(depth_bin)
+                lats.append(row.get("object_lat", np.nan))
+                lons.append(row.get("object_lon", np.nan))
 
         if not idxs:
             if not drop_empty:
