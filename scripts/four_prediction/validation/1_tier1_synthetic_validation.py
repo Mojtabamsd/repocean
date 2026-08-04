@@ -137,14 +137,25 @@ def assemble_profile(full_df, category_counts: dict, profile_id: str, scenario_n
             continue
         parts.append(sample_rows(full_df, cat, n))
     prof = pd.concat(parts, ignore_index=True)
+
+    # `original_sample_id` = the REAL profile each individual row came from.
+    # Kept purely for traceability/auditing - never used for grouping,
+    # since a Tier-1 synthetic profile is deliberately pooled from MANY
+    # real profiles and should stay ONE group.
+    prof["original_sample_id"] = prof["sample_id"]
+
     prof["synthetic_profile_id"] = profile_id
     prof["scenario_name"] = scenario_name
-    prof["original_sample_id"] = prof["sample_id"]
-    # `sample_id` is overwritten here to be the grouping key you'll actually
-    # use downstream: real source profile + synthetic scenario/profile.
-    # `original_sample_id` preserves the untouched real sample_id for
-    # traceability back to the source profile.
-    prof["sample_id"] = prof["original_sample_id"].astype(str) + "_" + prof["synthetic_profile_id"].astype(str)
+
+    # `sample_id` is the grouping key your metrics pipeline uses. It must
+    # identify the SYNTHETIC profile only (scenario + profile id), NOT be
+    # combined with the per-row original_sample_id - doing that previously
+    # fragmented one intended ~200-row synthetic profile into dozens of
+    # tiny 3-4-row groups, one per contributing real profile.
+    prof["sample_id"] = scenario_name + "__" + prof["synthetic_profile_id"].astype(str)
+
+    # per-row traceability id, safe to ignore for metric grouping
+    prof["source_row_uid"] = prof["original_sample_id"].astype(str) + "_" + prof["sample_id"].astype(str)
     return prof
 
 
@@ -157,47 +168,58 @@ def scenario_null_control(full_df, base_categories: dict, n_replicates=2):
     noise floor / null distribution."""
     frames = []
     for i in range(n_replicates):
-        pid = f"null_control_{i + 1}"
+        pid = f"null_control_{i+1}"
         frames.append(assemble_profile(full_df, base_categories, pid, "null_control"))
     return pd.concat(frames, ignore_index=True)
 
 
 def scenario_abundance_bloom(full_df, base_categories: dict, bloom_category: str,
-                             multipliers=(1, 3, 10)):
+                              multipliers=(1, 3, 10), n_replicates=4):
     """Same category set every time; one category's count is multiplied
-    to simulate a bloom, others held constant."""
+    to simulate a bloom, others held constant.
+
+    n_replicates independent draws per multiplier -- without this, each
+    multiplier level is a single profile, so you can't tell whether a
+    trend across levels is real signal or just one lucky/unlucky sample.
+    Replicates give you a spread at each level to compare against."""
     frames = []
     base_n = base_categories.get(bloom_category, 20)
     for mult in multipliers:
         cats = dict(base_categories)
         cats[bloom_category] = base_n * mult
-        pid = f"bloom_{bloom_category.replace(' ', '_')}_x{mult}"
-        frames.append(assemble_profile(full_df, cats, pid, "abundance_bloom"))
+        for rep in range(1, n_replicates + 1):
+            pid = f"bloom_{bloom_category.replace(' ', '_')}_x{mult}_rep{rep}"
+            frames.append(assemble_profile(full_df, cats, pid, "abundance_bloom"))
     return pd.concat(frames, ignore_index=True)
 
 
-def scenario_composition_swap(full_df, categories_a: dict, categories_b: dict):
+def scenario_composition_swap(full_df, categories_a: dict, categories_b: dict, n_replicates=4):
     """Two profiles, same total N, different category membership
-    (partial or full overlap allowed)."""
-    frames = [
-        assemble_profile(full_df, categories_a, "composition_A", "composition_swap"),
-        assemble_profile(full_df, categories_b, "composition_B", "composition_swap"),
-    ]
+    (partial or full overlap allowed). n_replicates independent draws
+    per side, same reasoning as bloom: 1 profile per side can't tell you
+    if a difference is a real composition effect or a single-draw fluke."""
+    frames = []
+    for rep in range(1, n_replicates + 1):
+        frames.append(assemble_profile(full_df, categories_a, f"composition_A_rep{rep}", "composition_swap"))
+        frames.append(assemble_profile(full_df, categories_b, f"composition_B_rep{rep}", "composition_swap"))
     return pd.concat(frames, ignore_index=True)
 
 
 def scenario_novel_category(full_df, base_categories: dict, novel_category: str,
-                            novel_counts=(0, 5, 20, 60)):
+                             novel_counts=(0, 5, 20, 60), n_replicates=4):
     """Baseline composition held fixed; a category absent from the
     baseline (novel_counts[0] == 0) is introduced at increasing
-    prevalence in subsequent profiles."""
+    prevalence in subsequent profiles. Replicated per count for the same
+    reason as bloom/composition_swap: one profile per level can't
+    distinguish a real trend from a single-draw fluke."""
     frames = []
     for n in novel_counts:
         cats = dict(base_categories)
-        pid = f"novel_{novel_category.replace(' ', '_')}_n{n}"
         if n > 0:
             cats[novel_category] = n
-        frames.append(assemble_profile(full_df, cats, pid, "novel_category"))
+        for rep in range(1, n_replicates + 1):
+            pid = f"novel_{novel_category.replace(' ', '_')}_n{n}_rep{rep}"
+            frames.append(assemble_profile(full_df, cats, pid, "novel_category"))
     return pd.concat(frames, ignore_index=True)
 
 
@@ -213,15 +235,15 @@ if __name__ == "__main__":
     # labels excluded), with decent row counts and profile coverage.
     # Chaetognatha and Thecosomata dropped (noisy labels per manual review).
     CHOSEN_CATEGORIES = [
-        "Copepoda<Maxillopoda",  # 11233 rows, 97.7% profiles - dominant real taxon
-        "Eumalacostraca",  # 438 rows, 81.8% profiles
-        "Limacinidae",  # 307 rows, 77.3% profiles
-        "Hydrozoa",  # 170 rows, 75.0% profiles
-        "Ostracoda",  # 166 rows, 70.5% profiles
-        "Siphonophorae",  # 121 rows, 68.2% profiles
-        "Annelida",  # 146 rows, 68.2% profiles
-        "Acantharia",  # 152 rows, 56.8% profiles
-        "Cydippida",  # 75 rows, 63.6% profiles
+        "Copepoda<Maxillopoda",   # 11233 rows, 97.7% profiles - dominant real taxon
+        "Eumalacostraca",         #   438 rows, 81.8% profiles
+        "Limacinidae",            #   307 rows, 77.3% profiles
+        "Hydrozoa",               #   170 rows, 75.0% profiles
+        "Ostracoda",              #   166 rows, 70.5% profiles
+        "Siphonophorae",          #   121 rows, 68.2% profiles
+        "Annelida",               #   146 rows, 68.2% profiles
+        "Acantharia",             #   152 rows, 56.8% profiles
+        "Cydippida",              #    75 rows, 63.6% profiles
     ]
 
     # Detritus is structurally different from a "rare class" - it's a
@@ -232,8 +254,8 @@ if __name__ == "__main__":
     # Two novel-category candidates at different rarity levels, since
     # "moderately rare newcomer" and "barely-there newcomer" test
     # different sensitivity thresholds.
-    NOVEL_LABEL_MODERATE = "Coelographis"  # 69 rows, 65.9% profiles
-    NOVEL_LABEL_RARE = "Foraminifera"  # 18 rows, 27.3% profiles
+    NOVEL_LABEL_MODERATE = "Coelographis"   #  69 rows, 65.9% profiles
+    NOVEL_LABEL_RARE = "Foraminifera"       #  18 rows, 27.3% profiles
 
     BASE_N_PER_CAT = 20
     base_categories = {c: BASE_N_PER_CAT for c in CHOSEN_CATEGORIES}
@@ -264,27 +286,22 @@ if __name__ == "__main__":
     baseline_without_novel = {k: v for k, v in base_categories.items() if k != NOVEL_LABEL_MODERATE}
     all_scenarios.append(
         scenario_novel_category(full_df, baseline_without_novel, NOVEL_LABEL_MODERATE,
-                                novel_counts=(0, 5, 20, 60))
+                                 novel_counts=(0, 5, 20, 60))
     )
 
     # rare novel category (fewer available rows -> smaller max count)
     baseline_without_rare = {k: v for k, v in base_categories.items() if k != NOVEL_LABEL_RARE}
     all_scenarios.append(
         scenario_novel_category(full_df, baseline_without_rare, NOVEL_LABEL_RARE,
-                                novel_counts=(0, 3, 8, 15))
+                                 novel_counts=(0, 3, 8, 15))
     )
 
     final = pd.concat(all_scenarios, ignore_index=True)
 
-    # `synthetic_profile_id` alone isn't guaranteed unique across scenarios
-    # (e.g. every scenario could in principle reuse names). Build an
-    # explicit, globally unique profile key to group/aggregate metrics on.
-    final["profile_uid"] = final["scenario_name"] + "__" + final["synthetic_profile_id"]
-    uid_map = {uid: i for i, uid in enumerate(final["profile_uid"].unique(), start=1)}
-    final["profile_int_id"] = final["profile_uid"].map(uid_map)
-
     # keep the same columns as predictions_with_top3_scores.csv, plus
-    # the bookkeeping columns we added
+    # the bookkeeping columns we added. `sample_id` is now the correct
+    # grouping key: one value per synthetic profile, shared by every row
+    # in it regardless of which real profile that row came from.
     out_path = OUT_DIR / "tier1_synthetic_profiles.csv"
     final.to_csv(out_path, index=False)
     print(f"\nSaved Tier-1 synthetic profiles -> {out_path}")
