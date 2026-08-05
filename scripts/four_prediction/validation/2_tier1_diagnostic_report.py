@@ -171,6 +171,98 @@ def score_composition_swap(df: pd.DataFrame, noise: pd.Series) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def score_novel_presence(df: pd.DataFrame, noise: pd.Series) -> pd.DataFrame:
+    """
+    For each novel category, compare the absent baseline (n=0)
+    separately against every level where the category is present.
+
+    Example:
+        Coelographis: n=0 vs n=5
+        Coelographis: n=0 vs n=20
+        Coelographis: n=0 vs n=60
+
+    No monotonic trend is required. The question is simply whether adding
+    the novel category changes the metric beyond the null-control noise.
+    """
+    sub = df[
+        (df["scenario_type"] == "novel_category")
+        & (df["num_rows"] >= MIN_ROWS)
+    ]
+
+    rows = []
+
+    for target, g in sub.groupby("scenario_target"):
+        baseline = g[g["scenario_level"] == 0]
+
+        if baseline.empty:
+            print(
+                f"[warn] No n=0 baseline found for novel category "
+                f"'{target}'; skipping."
+            )
+            continue
+
+        present_levels = sorted(
+            level
+            for level in g["scenario_level"].dropna().unique()
+            if level > 0
+        )
+
+        for present_level in present_levels:
+            present = g[g["scenario_level"] == present_level]
+
+            for metric in METRICS:
+                baseline_values = baseline[metric].dropna()
+                present_values = present[metric].dropna()
+
+                # Require at least two usable replicates in each group.
+                if len(baseline_values) < 2 or len(present_values) < 2:
+                    continue
+
+                baseline_mean = baseline_values.mean()
+                present_mean = present_values.mean()
+
+                # Signed change is useful for interpretation:
+                # positive = metric increased when species appeared
+                # negative = metric decreased when species appeared
+                delta = present_mean - baseline_mean
+                swing = abs(delta)
+
+                noise_floor = noise.get(metric, np.nan)
+
+                if pd.notna(noise_floor) and noise_floor > 0:
+                    effect_over_noise = swing / noise_floor
+                else:
+                    effect_over_noise = np.nan
+
+                working = (
+                    np.isfinite(effect_over_noise)
+                    and effect_over_noise >= EFFECT_OVER_NOISE_MIN
+                )
+
+                rows.append({
+                    "scenario_type": "novel_category",
+                    "scenario_target": target,
+                    "comparison": f"n0_vs_n{int(present_level)}",
+                    "baseline_level": 0,
+                    "present_level": present_level,
+                    "metric": metric,
+                    "baseline_mean": baseline_mean,
+                    "present_mean": present_mean,
+                    "delta": delta,
+                    "spearman_r": np.nan,
+                    "spearman_p": np.nan,
+                    "swing": swing,
+                    "noise_floor": noise_floor,
+                    "effect_over_noise": effect_over_noise,
+                    "n_baseline": len(baseline_values),
+                    "n_present": len(present_values),
+                    "n_groups": len(baseline_values) + len(present_values),
+                    "working": working,
+                })
+
+    return pd.DataFrame(rows)
+
+
 def spotlight_plot(df: pd.DataFrame, scenario_type: str, target: str, metric: str, tag: str):
     sub = df[(df["scenario_type"] == scenario_type) & (df["scenario_target"] == target)
              & (df["num_rows"] >= MIN_ROWS)]
@@ -289,9 +381,23 @@ if __name__ == "__main__":
     noise = null_noise_floor(df)
 
     scorecards = []
-    for scen in ["bloom", "novel_category"]:
-        scorecards.append(score_ordinal_scenario(df, scen, noise))
-    scorecards.append(score_composition_swap(df, noise))
+
+    # Bloom remains an ordinal trend test:
+    # does the metric consistently change from x1 -> x3 -> x10?
+    scorecards.append(
+        score_ordinal_scenario(df, "bloom", noise)
+    )
+
+    # Novel category becomes separate present-versus-absent comparisons:
+    # n=0 vs each n>0 level.
+    scorecards.append(
+        score_novel_presence(df, noise)
+    )
+
+    scorecards.append(
+        score_composition_swap(df, noise)
+    )
+
     scorecard = pd.concat(scorecards, ignore_index=True) if scorecards else pd.DataFrame()
 
     scorecard_path = OUT_DIR / "diagnostic_scorecard.csv"
