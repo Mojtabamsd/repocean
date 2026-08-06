@@ -62,15 +62,19 @@ METRICS = [
 ]
 
 SCENARIO_PATTERNS = [
-    # unified: captures a trailing replicate/index number regardless of
-    # what's between "_null_control_" and it (Tier 1: "_null_control_1",
-    # Tier 2: "_null_control_{anchor}_rep1")
-    ("null_control", re.compile(r"_null_control_.*?(\d+)$")),
-    ("bloom", re.compile(r"_bloom_(.+)_x(\d+)(?:_rep\d+)?$")),
-    # optional anchor-pair prefix before A/B (Tier 1: "_composition_A",
-    # Tier 2: "_composition_{anchor_x}_vs_{anchor_y}_A_rep1")
-    ("composition_swap", re.compile(r"_composition_(?:(.+)_)?(A|B)(?:_rep\d+)?$")),
-    ("novel_category", re.compile(r"_novel_(.+)_n(\d+)(?:_rep\d+)?$")),
+    ("null_control", re.compile(r"_null_control_.*?(\d+)$"), "null"),
+    # bloom now comes in additive/fixedn variants with distinct prefixes
+    ("abundance_bloom_additive", re.compile(r"_bloomadd_(.+)_x(\d+)(?:_rep\d+)?$"), "ordinal"),
+    ("abundance_bloom_fixedn", re.compile(r"_bloomfix_(.+)_x(\d+)(?:_rep\d+)?$"), "ordinal"),
+    ("novel_category_additive", re.compile(r"_noveladd_(.+)_n(\d+)(?:_rep\d+)?$"), "ordinal"),
+    ("novel_category_fixedn", re.compile(r"_novelfix_(.+)_n(\d+)(?:_rep\d+)?$"), "ordinal"),
+    # legacy Tier-1/older-Tier-2 names, kept for backward compatibility
+    ("abundance_bloom_additive", re.compile(r"_bloom_(.+)_x(\d+)(?:_rep\d+)?$"), "ordinal"),
+    ("novel_category_additive", re.compile(r"_novel_(.+)_n(\d+)(?:_rep\d+)?$"), "ordinal"),
+    ("composition_swap", re.compile(r"_composition_(?:(.+)_)?(A|B)(?:_rep\d+)?$"), "pair"),
+    # renamed, fixed-size version of composition_swap
+    ("real_profile_contrast", re.compile(r"_contrast_(.+)_(A|B)(?:_rep\d+)?$"), "pair"),
+    ("mixture_gradient", re.compile(r"_mixture_(.+)_p(\d+)(?:_rep\d+)?$"), "ordinal"),
 ]
 
 
@@ -82,18 +86,17 @@ def parse_group_id(group_id: str):
     column when present, not from string parsing, since Tier 2 anchor
     IDs can contain arbitrary characters that make robust parsing
     fragile."""
-    for scenario_type, pat in SCENARIO_PATTERNS:
+    for scenario_type, pat, shape in SCENARIO_PATTERNS:
         m = pat.search(group_id)
-        if m:
-            if scenario_type == "null_control":
-                return scenario_type, "null_control", int(m.group(1))
-            if scenario_type == "bloom":
-                return scenario_type, m.group(1), int(m.group(2))
-            if scenario_type == "composition_swap":
-                pair = m.group(1) if m.group(1) else "composition_swap"
-                return scenario_type, pair, (0 if m.group(2) == "A" else 1)
-            if scenario_type == "novel_category":
-                return scenario_type, m.group(1), int(m.group(2))
+        if not m:
+            continue
+        if shape == "null":
+            return scenario_type, "null_control", int(m.group(1))
+        if shape == "ordinal":
+            return scenario_type, m.group(1), int(m.group(2))
+        if shape == "pair":
+            pair = m.group(1) if m.group(1) else scenario_type
+            return scenario_type, pair, (0 if m.group(2) == "A" else 1)
     return "unknown", "unknown", np.nan
 
 
@@ -203,8 +206,10 @@ def score_ordinal_scenario(df: pd.DataFrame, scenario_type: str, noise_by_anchor
     return pd.DataFrame(rows)
 
 
-def score_composition_swap(df: pd.DataFrame, noise_by_anchor: dict) -> pd.DataFrame:
-    sub = df[(df["scenario_type"] == "composition_swap") & (df["num_rows"] >= MIN_ROWS)]
+def score_pair_scenario(df: pd.DataFrame, scenario_type: str, noise_by_anchor: dict) -> pd.DataFrame:
+    """For composition_swap / real_profile_contrast: compare the two
+    sides (level 0 vs level 1) of each anchor-pair target."""
+    sub = df[(df["scenario_type"] == scenario_type) & (df["num_rows"] >= MIN_ROWS)]
     rows = []
     if sub.empty:
         return pd.DataFrame(rows)
@@ -221,7 +226,7 @@ def score_composition_swap(df: pd.DataFrame, noise_by_anchor: dict) -> pd.DataFr
             ratio = swing / n if (n and n > 0) else np.nan
             works = (not pd.isna(ratio)) and (ratio >= EFFECT_OVER_NOISE_MIN)
             rows.append({
-                "scenario_type": "composition_swap", "anchor": target, "scenario_target": target, "metric": m,
+                "scenario_type": scenario_type, "anchor": target, "scenario_target": target, "metric": m,
                 "spearman_r": np.nan, "spearman_p": np.nan, "swing": swing,
                 "noise_floor": n, "effect_over_noise": ratio,
                 "n_groups": len(av) + len(bv), "working": works,
@@ -250,7 +255,30 @@ def spotlight_plot(df: pd.DataFrame, scenario_type: str, anchor: str, target: st
     return out_path
 
 
-def write_report(coverage: dict, scorecard: pd.DataFrame, spotlight_paths: dict):
+def anchor_rollup(scorecard: pd.DataFrame) -> pd.DataFrame:
+    """Per (scenario_type, metric): how many DISTINCT anchors was this
+    tested on, how many passed, and what's the median Spearman /
+    median effect-over-noise ACROSS anchors. This is the fix for
+    pooling all (anchor,target) pairs into one tally -- a metric that
+    works great on one anchor and fails on four others should not look
+    the same as one that works consistently across all five."""
+    if scorecard.empty:
+        return pd.DataFrame()
+    rows = []
+    for (scen, metric), g in scorecard.groupby(["scenario_type", "metric"]):
+        rows.append({
+            "scenario_type": scen, "metric": metric,
+            "n_anchors_tested": g["anchor"].nunique(),
+            "n_anchors_passed": g.loc[g["working"], "anchor"].nunique(),
+            "median_abs_spearman": g["spearman_r"].abs().median(),
+            "median_effect_over_noise": g["effect_over_noise"].median(),
+        })
+    out = pd.DataFrame(rows)
+    out["pct_anchors_passed"] = (out["n_anchors_passed"] / out["n_anchors_tested"] * 100).round(0)
+    return out.sort_values(["scenario_type", "pct_anchors_passed"], ascending=[True, False])
+
+
+def write_report(coverage: dict, scorecard: pd.DataFrame, rollup: pd.DataFrame, spotlight_paths: dict):
     lines = []
     lines.append("TIER 1 METRIC DIAGNOSTIC REPORT")
     lines.append("=" * 40)
@@ -295,6 +323,30 @@ def write_report(coverage: dict, scorecard: pd.DataFrame, spotlight_paths: dict)
         lines.append(f"   >> LEAST USEFUL SO FAR: '{worst}' -- either drop it or investigate why ")
         lines.append("      it doesn't track composition changes (could be a floor/ceiling effect, ")
         lines.append("      e.g. always near 1.0 or 0 when groups are small).")
+    lines.append("")
+
+    # ---- 2b. Per-anchor rollup: does the metric generalize across anchors? ----
+    lines.append("2b) PER-ANCHOR GENERALIZATION (does it work on ONE anchor or MOST anchors?)")
+    lines.append("   A metric passing overall could still be driven by one anchor and fail on")
+    lines.append("   the rest. This breaks that out: how many distinct anchors was each")
+    lines.append("   (scenario, metric) tested on, and what fraction of THOSE anchors passed.")
+    lines.append("")
+    if rollup.empty:
+        lines.append("   No anchor rollup available (see coverage issue above).")
+    else:
+        for scen in rollup["scenario_type"].unique():
+            r = rollup[rollup["scenario_type"] == scen].head(5)
+            lines.append(f"   {scen}:")
+            for _, row in r.iterrows():
+                lines.append(f"     {row['metric']:<28s} {int(row['n_anchors_passed'])}/"
+                             f"{int(row['n_anchors_tested'])} anchors passed "
+                             f"({row['pct_anchors_passed']:.0f}%), median|r|="
+                             f"{row['median_abs_spearman']:.2f}, median effect/noise="
+                             f"{row['median_effect_over_noise']:.2f}")
+        lines.append("")
+        lines.append("   >> A metric near 100% here is reliable across different real profiles.")
+        lines.append("      A metric that's high overall (section 2) but low here is only working")
+        lines.append("      on specific anchors -- worth checking what's different about those.")
     lines.append("")
 
     # ---- 3. Per-scenario detail ----
@@ -348,15 +400,24 @@ if __name__ == "__main__":
     coverage = coverage_summary(df)
     noise_by_anchor = null_noise_floor_by_anchor(df)
 
-    scorecards = []
-    for scen in ["bloom", "novel_category"]:
-        scorecards.append(score_ordinal_scenario(df, scen, noise_by_anchor))
-    scorecards.append(score_composition_swap(df, noise_by_anchor))
+    ordinal_types = ["abundance_bloom_additive", "abundance_bloom_fixedn",
+                      "novel_category_additive", "novel_category_fixedn",
+                      "mixture_gradient"]
+    pair_types = ["composition_swap", "real_profile_contrast"]
+
+    scorecards = [score_ordinal_scenario(df, t, noise_by_anchor) for t in ordinal_types]
+    scorecards += [score_pair_scenario(df, t, noise_by_anchor) for t in pair_types]
+    scorecards = [s for s in scorecards if not s.empty]
     scorecard = pd.concat(scorecards, ignore_index=True) if scorecards else pd.DataFrame()
 
     scorecard_path = OUT_DIR / "diagnostic_scorecard.csv"
     scorecard.to_csv(scorecard_path, index=False)
     print(f"Saved -> {scorecard_path}")
+
+    rollup = anchor_rollup(scorecard)
+    rollup_path = OUT_DIR / "diagnostic_anchor_rollup.csv"
+    rollup.to_csv(rollup_path, index=False)
+    print(f"Saved -> {rollup_path}")
 
     # spotlight plots: best metric overall, worst metric overall
     spotlight_paths = {}
@@ -375,4 +436,4 @@ if __name__ == "__main__":
         spotlight_paths["worst_metric"] = spotlight_plot(
             df, worst_row["scenario_type"], worst_row["anchor"], worst_row["scenario_target"], worst_metric, "WORST")
 
-    write_report(coverage, scorecard, spotlight_paths)
+    write_report(coverage, scorecard, rollup, spotlight_paths)
