@@ -145,23 +145,39 @@ def get_anchor_pool_and_composition(full_df: pd.DataFrame, anchor_id: str):
 # --------------------------------------------------------------------------
 def sample_rows_preferential(full_df: pd.DataFrame, anchor_pool: pd.DataFrame,
                               category: str, n: int) -> pd.DataFrame:
-    local = anchor_pool[anchor_pool[CAT_COL] == category]
-    if len(local) >= n:
-        idx = rng.choice(local.index.values, size=n, replace=False)
-        return full_df.loc[idx]
+    """Anchor's own rows first, topped up from the global pool if needed.
 
-    parts = [local]
-    remaining = n - len(local)
-    global_pool = full_df[(full_df[CAT_COL] == category) & (~full_df.index.isin(local.index))]
-    if len(global_pool) == 0:
-        raise ValueError(f"No rows anywhere for category '{category}'")
-    replace = len(global_pool) < remaining
-    if replace:
-        print(f"  [warn] category '{category}' has only {len(local) + len(global_pool)} rows "
-              f"dataset-wide, sampling {n} WITH replacement")
-    idx = rng.choice(global_pool.index.values, size=remaining, replace=replace)
-    parts.append(full_df.loc[idx])
-    return pd.concat(parts)
+    FIX (was bug): previously always included ALL local rows whenever
+    local < n, so every replicate shared the exact same local rows for
+    scarce categories -- replicate variability was artificially low for
+    exactly the categories where variability matters most. Now local
+    rows are themselves sampled (with replacement if n exceeds what's
+    locally available), so each replicate draws independently."""
+    local = anchor_pool[anchor_pool[CAT_COL] == category]
+    local_n = min(n, len(local))
+
+    parts = []
+    if local_n > 0:
+        local_idx = rng.choice(local.index.to_numpy(), size=local_n,
+                                replace=len(local) < local_n)
+        parts.append(full_df.loc[local_idx])
+
+    remaining = n - local_n
+    if remaining > 0:
+        global_pool = full_df[(full_df[CAT_COL] == category) & (~full_df.index.isin(local.index))]
+        if len(global_pool) == 0:
+            # nothing outside the anchor either -> fall back to local with replacement
+            global_pool = local
+        if len(global_pool) == 0:
+            raise ValueError(f"No rows anywhere for category '{category}'")
+        replace = len(global_pool) < remaining
+        if replace:
+            print(f"  [warn] category '{category}' has only {len(local) + len(global_pool)} rows "
+                  f"dataset-wide, sampling {n} WITH replacement")
+        idx = rng.choice(global_pool.index.to_numpy(), size=remaining, replace=replace)
+        parts.append(full_df.loc[idx])
+
+    return pd.concat(parts, ignore_index=False)
 
 
 def assemble_profile(full_df, anchor_pool, category_counts: dict, profile_id: str,
@@ -182,26 +198,75 @@ def assemble_profile(full_df, anchor_pool, category_counts: dict, profile_id: st
     return prof
 
 
-def bootstrap_to_target(anchor_pool: pd.DataFrame, target_n: int) -> dict:
-    """Resample uniformly from the anchor's own rows (with replacement if
-    needed) up to target_n. Since sampling is uniform over the anchor's
-    real rows, category proportions come out matching the real profile
-    automatically -- no manual category dict needed for a pure baseline."""
+def bootstrap_baseline_rows(anchor_pool: pd.DataFrame, target_n: int) -> pd.DataFrame:
+    """One independent bootstrap draw of target_n rows from the anchor's
+    own real rows. Category proportions come out matching the real
+    profile automatically. This is the SAME regime null control, bloom,
+    and novelty all now share -- previously only null control used
+    target_n; bloom/novelty started from the anchor's full (differently
+    sized) composition, so the noise floor and the manipulated scenario
+    were measured under different sample-size regimes."""
     replace = len(anchor_pool) < target_n
-    idx = rng.choice(anchor_pool.index.values, size=target_n, replace=replace)
-    sampled = anchor_pool.loc[idx]
-    return sampled[CAT_COL].value_counts().to_dict()
+    idx = rng.choice(anchor_pool.index.to_numpy(), size=target_n, replace=replace)
+    return anchor_pool.loc[idx]
+
+
+def rows_to_counts(rows: pd.DataFrame) -> dict:
+    return rows[CAT_COL].value_counts().to_dict()
+
+
+def bump_category_additive(counts: dict, category: str, base_n: int, mult: int) -> dict:
+    """Additive bloom/novelty: category count set to base_n * mult, on
+    top of the unchanged baseline -- total profile size grows with mult.
+    Tests: does the metric detect more objects of this category,
+    INCLUDING the resulting shift in total N and biological:detritus
+    ratio (a real bloom does both at once, so this is a valid scenario
+    in its own right -- just needs to be interpreted as such)."""
+    cats = dict(counts)
+    cats[category] = base_n * mult
+    return cats
+
+
+def bump_category_fixed_n(counts: dict, category: str, base_n: int, mult: int, rng_local) -> dict:
+    """Fixed-size bloom/novelty: add rows for `category`, remove the same
+    number of OTHER non-junk biological rows so total N stays constant.
+    Tests: does the metric detect the compositional shift ALONE, isolated
+    from any change in total profile size."""
+    cats = dict(counts)
+    current = cats.get(category, 0)
+    target = base_n * mult
+    added = max(target - current, 0)
+    cats[category] = current + added
+    if added == 0:
+        return cats
+
+    # remove `added` rows from other non-junk categories, proportionally
+    donors = {c: n for c, n in cats.items() if c != category and not is_excluded_category(c)}
+    donor_total = sum(donors.values())
+    if donor_total == 0:
+        return cats  # nothing to remove from; falls back to additive behavior
+    to_remove = added
+    for c, n in sorted(donors.items(), key=lambda kv: -kv[1]):
+        if to_remove <= 0:
+            break
+        share = min(n - 1, round(n / donor_total * added))  # leave at least 1
+        share = min(share, to_remove)
+        cats[c] = max(cats[c] - share, 0)
+        to_remove -= share
+    return cats
 
 
 # --------------------------------------------------------------------------
 # STEP 4: scenarios
 # --------------------------------------------------------------------------
 def scenario_null_control(full_df, anchor_pool, anchor_id, target_n=TARGET_N, n_replicates=N_REPLICATES):
-    """Multiple bootstrap draws from the SAME real profile's own
-    composition. Defines the noise floor for THIS anchor specifically."""
+    """Multiple independent target_n bootstrap draws from the SAME real
+    profile. Defines the noise floor for THIS anchor, at the SAME sample
+    size every other scenario for this anchor now uses."""
     frames = []
     for rep in range(1, n_replicates + 1):
-        cats = bootstrap_to_target(anchor_pool, target_n)
+        baseline_rows = bootstrap_baseline_rows(anchor_pool, target_n)
+        cats = rows_to_counts(baseline_rows)
         pid = f"null_control_{anchor_id}_rep{rep}"
         frames.append(assemble_profile(full_df, anchor_pool, cats, pid, "null_control", anchor_id))
     return pd.concat(frames, ignore_index=True)
@@ -209,59 +274,116 @@ def scenario_null_control(full_df, anchor_pool, anchor_id, target_n=TARGET_N, n_
 
 def scenario_abundance_bloom(full_df, anchor_pool, anchor_id, composition: dict,
                               bloom_category: str = None, multipliers=(1, 3, 10),
-                              n_replicates=N_REPLICATES):
-    """Real baseline composition, one real category multiplied. If no
-    category given, auto-picks the anchor's most abundant non-junk
-    category (a realistic bloom target)."""
+                              target_n=TARGET_N, n_replicates=N_REPLICATES):
+    """Bloom scenario, built on a fresh target_n baseline PER REPLICATE
+    (same regime as null control -- fixes the baseline-size mismatch).
+    Generates both variants:
+      abundance_bloom_additive : total N grows with the bloom
+      abundance_bloom_fixedn   : total N held constant, other
+                                  categories proportionally reduced
+    so a metric's response can be attributed to "more objects overall"
+    vs "compositional shift alone"."""
     if bloom_category is None:
         non_junk = {c: n for c, n in composition.items() if not is_excluded_category(c)}
         if not non_junk:
             raise ValueError(f"Anchor {anchor_id} has no non-junk categories to bloom.")
         bloom_category = max(non_junk, key=non_junk.get)
 
-    base_n = composition.get(bloom_category, 5)
     frames = []
     for mult in multipliers:
-        cats = dict(composition)
-        cats[bloom_category] = base_n * mult
         for rep in range(1, n_replicates + 1):
-            pid = f"bloom_{anchor_id}_{bloom_category.replace(' ', '_')}_x{mult}_rep{rep}"
-            frames.append(assemble_profile(full_df, anchor_pool, cats, pid, "abundance_bloom", anchor_id))
+            baseline_rows = bootstrap_baseline_rows(anchor_pool, target_n)
+            baseline_cats = rows_to_counts(baseline_rows)
+            base_n = baseline_cats.get(bloom_category, max(1, composition.get(bloom_category, 5)))
+
+            cats_add = bump_category_additive(baseline_cats, bloom_category, base_n, mult)
+            pid_add = f"bloomadd_{anchor_id}_{bloom_category.replace(' ', '_')}_x{mult}_rep{rep}"
+            frames.append(assemble_profile(full_df, anchor_pool, cats_add, pid_add,
+                                            "abundance_bloom_additive", anchor_id))
+
+            cats_fixed = bump_category_fixed_n(baseline_cats, bloom_category, base_n, mult, rng)
+            pid_fixed = f"bloomfix_{anchor_id}_{bloom_category.replace(' ', '_')}_x{mult}_rep{rep}"
+            frames.append(assemble_profile(full_df, anchor_pool, cats_fixed, pid_fixed,
+                                            "abundance_bloom_fixedn", anchor_id))
     return pd.concat(frames, ignore_index=True), bloom_category
 
 
-def scenario_composition_swap(full_df, anchor_pool_x, anchor_id_x, composition_x,
-                               anchor_pool_y, anchor_id_y, composition_y,
-                               n_replicates=N_REPLICATES):
-    """Two REAL profiles' real compositions, resampled up to comparable
-    size. This is the realism-anchored version of Tier 1's hand-picked
-    category-list swap: the difference here is whatever two real
-    profiles actually differ by."""
+def scenario_novel_category(full_df, anchor_pool, anchor_id, composition: dict,
+                             novel_category: str, novel_counts, target_n=TARGET_N,
+                             n_replicates=N_REPLICATES):
+    """Novel-category injection, built on a fresh target_n baseline PER
+    REPLICATE (same fix as bloom). Both additive and fixed-n variants."""
     frames = []
-    for rep in range(1, n_replicates + 1):
-        pid_x = f"composition_{anchor_id_x}_vs_{anchor_id_y}_A_rep{rep}"
-        pid_y = f"composition_{anchor_id_x}_vs_{anchor_id_y}_B_rep{rep}"
-        frames.append(assemble_profile(full_df, anchor_pool_x, composition_x, pid_x,
-                                        "composition_swap", anchor_id_x))
-        frames.append(assemble_profile(full_df, anchor_pool_y, composition_y, pid_y,
-                                        "composition_swap", anchor_id_y))
+    for n in novel_counts:
+        for rep in range(1, n_replicates + 1):
+            baseline_rows = bootstrap_baseline_rows(anchor_pool, target_n)
+            baseline_cats = rows_to_counts(baseline_rows)
+            baseline_cats.pop(novel_category, None)  # anchor shouldn't have it; drop if bootstrap got unlucky
+
+            cats_add = dict(baseline_cats)
+            if n > 0:
+                cats_add[novel_category] = n
+            pid_add = f"noveladd_{anchor_id}_{novel_category.replace(' ', '_')}_n{n}_rep{rep}"
+            frames.append(assemble_profile(full_df, anchor_pool, cats_add, pid_add,
+                                            "novel_category_additive", anchor_id))
+
+            cats_fixed = bump_category_fixed_n(baseline_cats, novel_category, 0, 1, rng) if n == 0 \
+                else bump_category_fixed_n(baseline_cats, novel_category, n, 1, rng)
+            pid_fixed = f"novelfix_{anchor_id}_{novel_category.replace(' ', '_')}_n{n}_rep{rep}"
+            frames.append(assemble_profile(full_df, anchor_pool, cats_fixed, pid_fixed,
+                                            "novel_category_fixedn", anchor_id))
     return pd.concat(frames, ignore_index=True)
 
 
-def scenario_novel_category(full_df, anchor_pool, anchor_id, composition: dict,
-                             novel_category: str, novel_counts, n_replicates=N_REPLICATES):
-    """Real baseline (which genuinely lacks novel_category), real
-    novel_category rows injected at increasing counts, sourced from the
-    global pool since the anchor has none by definition."""
-    baseline = {k: v for k, v in composition.items() if k != novel_category}
+def scenario_real_profile_contrast(full_df, anchor_pool_x, anchor_id_x,
+                                    anchor_pool_y, anchor_id_y,
+                                    target_n=TARGET_N, n_replicates=N_REPLICATES):
+    """Two REAL profiles' compositions, each independently bootstrapped
+    to the SAME target_n (previously used the full, differently-sized
+    anchor compositions -- inconsistent with every other scenario).
+
+    Renamed from 'composition_swap': this is NOT a controlled
+    perturbation. X and Y can differ in taxonomy, detritus ratio,
+    richness, depth, location, batch effects, all at once. A metric
+    responding here only tells you it can tell X and Y apart -- not
+    WHICH difference it's responding to. Use scenario_mixture_gradient
+    for an isolated, controlled version of this question."""
     frames = []
-    for n in novel_counts:
-        cats = dict(baseline)
-        if n > 0:
-            cats[novel_category] = n
+    for rep in range(1, n_replicates + 1):
+        rows_x = bootstrap_baseline_rows(anchor_pool_x, target_n)
+        rows_y = bootstrap_baseline_rows(anchor_pool_y, target_n)
+        cats_x = rows_to_counts(rows_x)
+        cats_y = rows_to_counts(rows_y)
+        pid_x = f"contrast_{anchor_id_x}_vs_{anchor_id_y}_A_rep{rep}"
+        pid_y = f"contrast_{anchor_id_x}_vs_{anchor_id_y}_B_rep{rep}"
+        frames.append(assemble_profile(full_df, anchor_pool_x, cats_x, pid_x,
+                                        "real_profile_contrast", anchor_id_x))
+        frames.append(assemble_profile(full_df, anchor_pool_y, cats_y, pid_y,
+                                        "real_profile_contrast", anchor_id_y))
+    return pd.concat(frames, ignore_index=True)
+
+
+def scenario_mixture_gradient(full_df, anchor_pool_x, anchor_id_x,
+                               anchor_pool_y, anchor_id_y,
+                               fractions=(0, 10, 25, 50), target_n=TARGET_N,
+                               n_replicates=N_REPLICATES):
+    """Controlled, FIXED-SIZE gradient: X progressively contaminated with
+    a known percentage of Y, total N held constant throughout. This is
+    what 'real_profile_contrast' can't give you -- an isolated answer to
+    'does the metric respond monotonically as profile Y's influence
+    grows', with everything else (total N) held fixed."""
+    frames = []
+    for pct in fractions:
         for rep in range(1, n_replicates + 1):
-            pid = f"novel_{anchor_id}_{novel_category.replace(' ', '_')}_n{n}_rep{rep}"
-            frames.append(assemble_profile(full_df, anchor_pool, cats, pid, "novel_category", anchor_id))
+            n_y = round(target_n * pct / 100)
+            n_x = target_n - n_y
+            rows_x = bootstrap_baseline_rows(anchor_pool_x, n_x) if n_x > 0 else anchor_pool_x.iloc[0:0]
+            rows_y = bootstrap_baseline_rows(anchor_pool_y, n_y) if n_y > 0 else anchor_pool_y.iloc[0:0]
+            mix_rows = pd.concat([rows_x, rows_y], ignore_index=False)
+            cats = rows_to_counts(mix_rows)
+            pid = f"mixture_{anchor_id_x}_vs_{anchor_id_y}_p{pct}_rep{rep}"
+            frames.append(assemble_profile(full_df, anchor_pool_x, cats, pid,
+                                            "mixture_gradient", anchor_id_x))
     return pd.concat(frames, ignore_index=True)
 
 
@@ -315,14 +437,18 @@ if __name__ == "__main__":
         else:
             print(f"  [info] no suitable novel category found for anchor {aid}, skipping")
 
-    # composition swap: pair up consecutive anchors (by size rank) so
-    # each pair is a realistic "these two real profiles differ" test
+    # real profile contrast + mixture gradient: pair up consecutive
+    # anchors (by size rank) so each pair is a realistic "these two real
+    # profiles differ" test
     for i in range(0, len(anchor_ids) - 1, 2):
         aid_x, aid_y = anchor_ids[i], anchor_ids[i + 1]
-        pool_x, comp_x = anchor_data[aid_x]
-        pool_y, comp_y = anchor_data[aid_y]
+        pool_x, _ = anchor_data[aid_x]
+        pool_y, _ = anchor_data[aid_y]
         all_scenarios.append(
-            scenario_composition_swap(full_df, pool_x, aid_x, comp_x, pool_y, aid_y, comp_y)
+            scenario_real_profile_contrast(full_df, pool_x, aid_x, pool_y, aid_y)
+        )
+        all_scenarios.append(
+            scenario_mixture_gradient(full_df, pool_x, aid_x, pool_y, aid_y)
         )
 
     final = pd.concat(all_scenarios, ignore_index=True)
