@@ -275,13 +275,331 @@ CALCULATE_POPULATION_WEIGHTED = True
 
 
 # ======================================================================
-# 4. LABEL EQUIVALENCES USED BY THE FUSION ENGINE
+# 4. LABEL ALIAS / EQUIVALENCE RULES
+# ======================================================================
+#
+# The expert export and the three model outputs do not always use exactly
+# the same string for the same biological/annotation group.  For example:
+#
+#     Salpida
+#     chain<Salpida
+#     zoom-in<Salpida
+#
+# are intentionally evaluated as the same class.
+#
+# The rules below are ONLY used for evaluation.  The raw labels from the
+# input files are always retained unchanged in the merged validation file.
+#
+# Matching is:
+#     - case-insensitive
+#     - whitespace-normalized
+#     - tolerant of HTML space entities such as &#x20;
+#     - substring-aware, but with boundaries so that a short word such as
+#       "other" does not accidentally match "otherliving".
+#
+# IMPORTANT OVERLAP:
+#     "tentacle<gelatinous" occurs in groups 11 and 15 in the requested
+#     terminology.  Group 15 is given higher priority, so the exact
+#     "tentacle<gelatinous" label is assigned to group 15.
+#
+# The canonical labels below are lower-case evaluation labels only.
 # ======================================================================
 
-VOTE_EQUIV = {
-    "like<feces": "detritus",
-    "badfocus<artefact": "artefact",
-}
+LABEL_ALIAS_GROUPS = [
+
+    # --------------------------------------------------------------
+    # 1. Chaetognatha
+    # --------------------------------------------------------------
+    {
+        "group_id": 1,
+        "canonical": "chaetognatha",
+        "priority": 0,
+        "aliases": [
+            "chaetognatha<animalia",
+            "chaetognatha",
+        ],
+    },
+
+    # --------------------------------------------------------------
+    # 2. Copepoda
+    # --------------------------------------------------------------
+    {
+        "group_id": 2,
+        "canonical": "copepoda",
+        "priority": 0,
+        "aliases": [
+            "copepoda<multicrustacea",
+            "copepoda",
+            "multicrustacea",
+            "like<copepoda",
+            "calanoida",
+            "copepoda eggs",
+            "euchaetidae",
+            "hyperiidea",
+            "calanidae",
+            "crustacea",
+        ],
+    },
+
+    # --------------------------------------------------------------
+    # 3. artefact
+    # --------------------------------------------------------------
+    {
+        "group_id": 3,
+        "canonical": "artefact",
+        "priority": 0,
+        "aliases": [
+            "artefact",
+            "crystal",
+            "bubble",
+        ],
+    },
+
+    # # --------------------------------------------------------------
+    # # 4. small<Cnidaria
+    # # --------------------------------------------------------------
+    # {
+    #     "group_id": 4,
+    #     "canonical": "small<cnidaria",
+    #     "priority": 0,
+    #     "aliases": [
+    #         "small<cnidaria",
+    #         "small_cnidaria",
+    #         "cnidaria",
+    #     ],
+    # },
+
+    # --------------------------------------------------------------
+    # 5. Ctenophora
+    # --------------------------------------------------------------
+    {
+        "group_id": 5,
+        "canonical": "ctenophora",
+        "priority": 0,
+        "aliases": [
+            "ctenophora<animalia",
+            "ctenophora",
+            "tentacle<ctenophora",
+        ],
+    },
+
+    # --------------------------------------------------------------
+    # 6. Salpida
+    # --------------------------------------------------------------
+    {
+        "group_id": 6,
+        "canonical": "Salpida",
+        "priority": 0,
+        "aliases": [
+            "chain<Salpida",
+            "chain",
+            "Salpida",
+            "zoom in<Salpida",
+            "zoom-in<Salpida",
+        ],
+    },
+
+    # --------------------------------------------------------------
+    # 7. detritus
+    # --------------------------------------------------------------
+    {
+        "group_id": 7,
+        "canonical": "detritus",
+        "priority": 0,
+        "aliases": [
+            "detritus<not-living",
+            "detritus",
+            "puff",
+            "cloud",
+            "egg sac<egg",
+            "dead<house",
+
+            # Existing fusion equivalence retained for consistency
+            # with the previously produced fusion predictions.
+            "like<feces",
+        ],
+    },
+
+    # --------------------------------------------------------------
+    # 8. fiber
+    # --------------------------------------------------------------
+    {
+        "group_id": 8,
+        "canonical": "fiber",
+        "priority": 0,
+        "aliases": [
+            "fiber<detritus",
+            "fiber",
+            # "like<feces",
+        ],
+    },
+
+    # --------------------------------------------------------------
+    # 9. filament
+    # --------------------------------------------------------------
+    {
+        "group_id": 9,
+        "canonical": "filament",
+        "priority": 0,
+        "aliases": [
+            "filament<detritus",
+            "filament",
+            "creseis acicula",
+        ],
+    },
+
+    # --------------------------------------------------------------
+    # 10. house
+    # --------------------------------------------------------------
+    # {
+    #     "group_id": 10,
+    #     "canonical": "house",
+    #     "priority": 0,
+    #     "aliases": [
+    #         "dead<house",
+    #         "house",
+    #     ],
+    # },
+
+    # --------------------------------------------------------------
+    # 11. zoom-in<gelatinous
+    # --------------------------------------------------------------
+    {
+        "group_id": 11,
+        "canonical": "zoom-in<gelatinous",
+        "priority": 10,
+        "aliases": [
+            "zoom-in<gelatinous",
+            "zoom-in",
+            "gelatinous",
+        ],
+    },
+
+    # --------------------------------------------------------------
+    # 12. tentacle<larvae
+    # --------------------------------------------------------------
+    {
+        "group_id": 12,
+        "canonical": "tentacle<larvae",
+        "priority": 0,
+        "aliases": [
+            "tentacle<larvae",
+            "larvae",
+            "late stage",
+            "head<larvae<ceriantharia",
+            "half part",
+            "early stage",
+            "ceriantharia",
+        ],
+    },
+
+    # --------------------------------------------------------------
+    # 13. othertocheck / other<living / other
+    # --------------------------------------------------------------
+    {
+        "group_id": 13,
+        "canonical": "othertocheck",
+        "priority": 0,
+        "aliases": [
+            "othertocheck",
+            "other<living",
+            "otherliving",
+            "other",
+        ],
+    },
+
+    # --------------------------------------------------------------
+    # 14. Rhizaria
+    # --------------------------------------------------------------
+    {
+        "group_id": 14,
+        "canonical": "rhizaria",
+        "priority": 0,
+        "aliases": [
+            "rhizaria",
+            "like<rhizaria",
+            "aulacantha",
+        ],
+    },
+
+    # --------------------------------------------------------------
+    # 15. tentacle<gelatinous
+    # --------------------------------------------------------------
+    # Higher priority than group 11 for the exact overlapping label.
+    {
+        "group_id": 15,
+        "canonical": "tentacle<gelatinous",
+        "priority": 100,
+        "aliases": [
+            "tentacle<gelatinous",
+            "tentacle<cnidaria",
+            "tentacle_ctenophora",
+        ],
+    },
+
+    # --------------------------------------------------------------
+    # 16.
+    # --------------------------------------------------------------
+    {
+        "group_id": 16,
+        "canonical": "acantharia",
+        "priority": 100,
+        "aliases": [
+            "acantharia",
+            "spiky<acantharia",
+            "foraminifera",
+        ],
+    },
+
+    # --------------------------------------------------------------
+    # 16.
+    # --------------------------------------------------------------
+    {
+        "group_id": 17,
+        "canonical": "hydrozoa",
+        "priority": 100,
+        "aliases": [
+            "hydrozoa",
+            "aglantha",
+            "small<cnidaria",
+            "botrynema",
+            "narcomedusae",
+            "Trachymedusae",
+        ],
+    },
+
+    {
+        "group_id": 18,
+        "canonical": "darksphere",
+        "priority": 100,
+        "aliases": [
+            "darksphere",
+            "dark_sphere",
+        ],
+    },
+
+    {
+        "group_id": 19,
+        "canonical": "salpida",
+        "priority": 100,
+        "aliases": [
+            "salpida",
+            "lobata",
+        ],
+    },
+
+    {
+        "group_id": 20,
+        "canonical": "solitaryblack",
+        "priority": 100,
+        "aliases": [
+            "solitaryblack",
+            "aulacanthidae",
+        ],
+    },
+
+
+]
 
 
 # ======================================================================
@@ -306,14 +624,10 @@ plt.rcParams.update({
 # 6. GENERAL HELPERS
 # ======================================================================
 
+
 def normalized_text(value):
     """
-    Normalize text conservatively.
-
-    Intended for:
-        - labels
-        - taxonomy names
-        - label-map lookup
+    Normalize label/taxonomy text without changing its semantic content.
     """
 
     if pd.isna(value):
@@ -326,9 +640,20 @@ def normalized_text(value):
         text,
     )
 
+    # Decode common HTML character entities, including &#x20;.
+    import html
+
+    text = html.unescape(text)
+
+    # Unicode non-breaking space.
+    text = text.replace(
+        "\u00a0",
+        " ",
+    )
+
     text = text.strip().lower()
 
-    # Normalize Unicode dash variants
+    # Normalize Unicode dash variants.
     text = (
         text
         .replace("\u2010", "-")
@@ -338,17 +663,24 @@ def normalized_text(value):
         .replace("\u2014", "-")
     )
 
-    # Normalize whitespace around "<"
+    # Normalize whitespace around hierarchy separator.
     text = re.sub(
         r"\s*<\s*",
         "<",
         text,
     )
 
-    # Collapse whitespace
+    # Normalize multiple whitespace characters.
     text = re.sub(
         r"\s+",
         " ",
+        text,
+    )
+
+    # Normalize "zoom in" / "zoom_in" to "zoom-in".
+    text = re.sub(
+        r"\bzoom[\s_-]+in\b",
+        "zoom-in",
         text,
     )
 
@@ -357,17 +689,7 @@ def normalized_text(value):
 
 def loose_label_key(value):
     """
-    A second-level label key.
-
-    Treats:
-        'zoom in'
-        'zoom-in'
-        'zoom_in'
-
-    as equivalent.
-
-    This is useful because EcoTaxa may export a label differently
-    from the flat model label vocabulary.
+    Create a lookup key tolerant of spaces, hyphens and underscores.
     """
 
     text = normalized_text(value)
@@ -382,21 +704,177 @@ def loose_label_key(value):
     )
 
 
-def apply_vote_equivalence(value):
+def alias_occurs(text, alias):
     """
-    Apply the equivalences explicitly used by the fusion engine.
+    Return True when alias occurs as a semantic token/segment inside text.
+
+    This is slightly safer than plain substring matching. For example:
+
+        other<living  -> matches "other"
+        multiple<other -> matches "other"
+        otherliving    -> does NOT match "other"
+
+    Thus the requested 'contains' behaviour is retained without
+    accidentally collapsing unrelated compound words.
+    """
+
+    if not text or not alias:
+        return False
+
+    start = text.find(alias)
+
+    while start >= 0:
+
+        end = start + len(alias)
+
+        before_ok = (
+            start == 0
+            or not text[start - 1].isalnum()
+        )
+
+        after_ok = (
+            end == len(text)
+            or not text[end].isalnum()
+        )
+
+        if before_ok and after_ok:
+            return True
+
+        start = text.find(
+            alias,
+            start + 1,
+        )
+
+    return False
+
+
+def build_alias_rules():
+    """
+    Expand alias groups and sort them so that:
+
+        1. longer aliases win;
+        2. explicit group priority resolves equal-length conflicts.
+    """
+
+    rules = []
+
+    for group in LABEL_ALIAS_GROUPS:
+
+        canonical = normalized_text(
+            group["canonical"]
+        )
+
+        for alias in group["aliases"]:
+
+            normalized_alias = normalized_text(
+                alias
+            )
+
+            if normalized_alias is None:
+                continue
+
+            rules.append({
+                "group_id": group["group_id"],
+                "canonical": canonical,
+                "alias": normalized_alias,
+                "priority": group["priority"],
+                "length": len(normalized_alias),
+            })
+
+    rules.sort(
+        key=lambda rule: (
+            -rule["length"],
+            -rule["priority"],
+            rule["group_id"],
+        )
+    )
+
+    return rules
+
+
+LABEL_ALIAS_RULES = build_alias_rules()
+
+
+def canonicalize_for_evaluation(
+    value,
+    return_rule=False,
+):
+    """
+    Convert a raw model/expert label into the requested canonical group.
+
+    Examples
+    --------
+    Salpida
+        -> salpida
+
+    chain<Salpida
+        -> salpida
+
+    zoom-in<Salpida
+        -> salpida
+
+    detritus<not-living
+        -> detritus
+
+    fiber<detritus
+        -> fiber
+
+    tentacle_cnidaria
+        -> tentacle<gelatinous
+
+    tentacle<gelatinous
+        -> tentacle<gelatinous
+
+    A label that matches no rule is returned unchanged after
+    normalization.
     """
 
     text = normalized_text(value)
 
     if text is None:
+
+        if return_rule:
+            return None, None, None
+
         return None
 
-    return normalized_text(
-        VOTE_EQUIV.get(
+    for rule in LABEL_ALIAS_RULES:
+
+        if alias_occurs(
             text,
+            rule["alias"],
+        ):
+
+            if return_rule:
+
+                return (
+                    rule["canonical"],
+                    rule["group_id"],
+                    rule["alias"],
+                )
+
+            return rule["canonical"]
+
+    if return_rule:
+
+        return (
             text,
+            None,
+            None,
         )
+
+    return text
+
+
+def apply_vote_equivalence(value):
+    """
+    Backward-compatible name used elsewhere in this script.
+
+    It now applies the full requested alias-group normalization.
+    """
+
+    return canonicalize_for_evaluation(
+        value
     )
 
 
@@ -455,12 +933,13 @@ def wilson_interval(
 # 8. LOAD LABEL MAP
 # ======================================================================
 
+
 def load_superclass_map(path):
     """
-    Load:
+    Load the authoritative fine-label -> ecotaxa_20 superclass mapping.
 
-        label
-        superclass_ecotaxa_20
+    The returned dictionary is kept in RAW-label space so it can also be
+    used to reconstruct the original sampling design exactly.
     """
 
     mapping_df = pd.read_csv(
@@ -512,18 +991,76 @@ def load_superclass_map(path):
     return mapping
 
 
+def map_label_to_superclass(
+    value,
+    superclass_map,
+):
+    """
+    Map a label to ecotaxa_20 superclass.
+
+    First try the exact normalized raw label, because this preserves the
+    original sampling taxonomy.  If that is unavailable, try the requested
+    alias-normalized label.
+    """
+
+    raw = normalized_text(
+        value
+    )
+
+    if raw is None:
+        return None, "missing"
+
+    raw_key = loose_label_key(
+        raw
+    )
+
+    if (
+        raw_key is not None
+        and raw_key in superclass_map
+    ):
+        return (
+            superclass_map[raw_key],
+            "raw_label",
+        )
+
+    canonical = canonicalize_for_evaluation(
+        raw
+    )
+
+    canonical_key = loose_label_key(
+        canonical
+    )
+
+    if (
+        canonical_key is not None
+        and canonical_key in superclass_map
+    ):
+        return (
+            superclass_map[canonical_key],
+            "alias_normalized",
+        )
+
+    return (
+        None,
+        "unmapped",
+    )
+
+
 # ======================================================================
 # 9. LOAD MODEL LABEL VOCABULARY
 # ======================================================================
 
+
 def build_model_vocabulary(fused):
     """
-    Build a loose-key -> canonical model label map from M1/M2/M3.
+    Build a canonical evaluation vocabulary from all M1/M2/M3 labels.
+
+    This is important because several raw labels are intentionally treated
+    as the same evaluation group.
     """
 
     vocabulary = {}
-
-    collision_rows = []
+    audit_rows = []
 
     for model, column in MODEL_LABELS.items():
 
@@ -536,8 +1073,11 @@ def build_model_vocabulary(fused):
 
         for value in values:
 
-            canonical = normalized_text(
-                value
+            canonical, group_id, matched_alias = (
+                canonicalize_for_evaluation(
+                    value,
+                    return_rule=True,
+                )
             )
 
             key = loose_label_key(
@@ -547,37 +1087,26 @@ def build_model_vocabulary(fused):
             if key is None:
                 continue
 
-            if key in vocabulary:
+            vocabulary[key] = canonical
 
-                if vocabulary[key] != canonical:
+            audit_rows.append({
+                "source": model,
+                "raw_label": value,
+                "evaluation_label": canonical,
+                "alias_group": group_id,
+                "matched_alias": matched_alias,
+            })
 
-                    collision_rows.append({
-                        "loose_key": key,
-                        "existing": vocabulary[key],
-                        "new": canonical,
-                    })
+    audit_df = pd.DataFrame(
+        audit_rows
+    )
 
-            else:
+    if not audit_df.empty:
 
-                vocabulary[key] = canonical
-
-
-    if collision_rows:
-
-        collision_df = pd.DataFrame(
-            collision_rows
-        )
-
-        collision_df.to_csv(
+        audit_df.to_csv(
             OUTPUT_DIR
-            / "label_vocabulary_collisions.csv",
+            / "model_label_alias_audit.csv",
             index=False,
-        )
-
-        print(
-            "\nWARNING:"
-            f" {len(collision_df)} label-vocabulary "
-            "collisions detected."
         )
 
     return vocabulary
@@ -587,28 +1116,17 @@ def build_model_vocabulary(fused):
 # 10. CANONICALIZE EXPERT LABEL
 # ======================================================================
 
+
 def expert_label_candidates(
     category,
     hierarchy,
 ):
     """
-    Build reasonable representations of an EcoTaxa expert label.
+    Generate reasonable representations of an EcoTaxa expert annotation.
 
-    Example:
-
-        detritus<not-living
-        ->
-        detritus<not-living
-        detritus
-        detritus
-
-    Example:
-
-        Copepoda<Multicrustacea
-        ->
-        Copepoda<Multicrustacea
-        Copepoda
-        Copepoda
+    The explicit category is preferred.  Hierarchy pieces provide a fallback
+    for annotations where the exported category does not directly correspond
+    to a model label.
     """
 
     category = normalized_text(
@@ -629,12 +1147,10 @@ def expert_label_candidates(
         if value not in candidates:
             candidates.append(value)
 
-
-    # Complete EcoTaxa category
+    # Complete exported category first.
     add(category)
 
-
-    # Main label before '<'
+    # Main label before '<'.
     if category and "<" in category:
 
         add(
@@ -644,31 +1160,25 @@ def expert_label_candidates(
             )[0].strip()
         )
 
-
-    # Final hierarchy node
+    # Hierarchy leaf and parent nodes.
     if hierarchy:
 
         hierarchy_parts = [
             x.strip()
-            for x in hierarchy.split(
-                ">"
-            )
+            for x in hierarchy.split(">")
             if x.strip()
         ]
 
         if hierarchy_parts:
 
-            # Prefer leaf
             add(
                 hierarchy_parts[-1]
             )
 
-            # Also make parent nodes available
             for part in reversed(
                 hierarchy_parts[:-1]
             ):
                 add(part)
-
 
     return candidates
 
@@ -679,8 +1189,8 @@ def canonicalize_expert_label(
     model_vocab,
 ):
     """
-    Select the expert representation that best matches the model
-    label vocabulary.
+    Convert expert annotation to the same alias-normalized label space
+    used for M1/M2/M3/Fusion evaluation.
 
     Returns:
         expert_label_for_evaluation
@@ -688,22 +1198,56 @@ def canonicalize_expert_label(
         match_source
     """
 
+    # ---------------------------------------------------------------
+    # First and preferred route: explicit EcoTaxa category.
+    # ---------------------------------------------------------------
+
+    direct, group_id, matched_alias = (
+        canonicalize_for_evaluation(
+            category,
+            return_rule=True,
+        )
+    )
+
+    direct_key = loose_label_key(
+        direct
+    )
+
+    if (
+        direct_key is not None
+        and direct_key in model_vocab
+    ):
+
+        return (
+            model_vocab[direct_key],
+            True,
+            (
+                "category_alias_group_"
+                f"{group_id}"
+                if group_id is not None
+                else "category_model_vocab"
+            ),
+        )
+
+    # ---------------------------------------------------------------
+    # Second route: category/hierarchy candidates.
+    # ---------------------------------------------------------------
+
     candidates = expert_label_candidates(
         category,
         hierarchy,
     )
 
-
-    # ---------------------------------------------------------------
-    # Prefer exact/vocabulary-compatible representations
-    # ---------------------------------------------------------------
-
     for i, candidate in enumerate(
         candidates
     ):
 
-        key = loose_label_key(
+        canonical = canonicalize_for_evaluation(
             candidate
+        )
+
+        key = loose_label_key(
+            canonical
         )
 
         if (
@@ -714,25 +1258,26 @@ def canonicalize_expert_label(
             return (
                 model_vocab[key],
                 True,
-                (
-                    "candidate_"
-                    + str(i + 1)
-                ),
+                f"candidate_{i+1}_model_vocab",
             )
 
-
     # ---------------------------------------------------------------
-    # Otherwise use the first available representation
+    # No shared vocabulary match.  Still retain the alias-normalized
+    # expert label so the evaluation result is reproducible.
     # ---------------------------------------------------------------
 
-    if candidates:
+    if direct is not None:
 
         return (
-            candidates[0],
+            direct,
             False,
-            "unmatched_candidate",
+            (
+                "category_alias_group_"
+                f"{group_id}"
+                if group_id is not None
+                else "normalized_category"
+            ),
         )
-
 
     return (
         None,
@@ -745,47 +1290,50 @@ def canonicalize_expert_label(
 # 11. MAP EXPERT SUPERCLASS
 # ======================================================================
 
+
 def map_expert_superclass(
     category,
     hierarchy,
     superclass_map,
 ):
     """
-    Map expert annotation to ecotaxa_20.
-
-    The mapping is done by testing:
-        category
-        category main label
-        hierarchy leaf
-        hierarchy parents
-
-    against label_to_int.csv.
+    Map an expert annotation to ecotaxa_20 using the same alias rules.
     """
 
+    # Prefer the explicit annotation category.
+    superclass, source = map_label_to_superclass(
+        category,
+        superclass_map,
+    )
+
+    if superclass is not None:
+
+        return (
+            superclass,
+            f"category_{source}",
+        )
+
+    # Fall back to hierarchy candidates.
     candidates = expert_label_candidates(
         category,
         hierarchy,
     )
 
-
     for i, candidate in enumerate(
         candidates
     ):
 
-        key = loose_label_key(
-            candidate
+        superclass, source = map_label_to_superclass(
+            candidate,
+            superclass_map,
         )
 
-        if (
-            key is not None
-            and key in superclass_map
-        ):
+        if superclass is not None:
 
             return (
-                superclass_map[key],
-                f"candidate_{i+1}",
+                superclass,
+                f"candidate_{i+1}_{source}",
             )
-
 
     return (
         None,
@@ -1258,19 +1806,32 @@ def build_validation_dataset(
         )
 
 
-        # model superclass from label map
+        # Model superclass from the authoritative mapping.
+        # Raw label mapping is attempted first, followed by alias-aware
+        # fallback for equivalent composite labels.
         validation[
             f"{model}_superclass"
-        ] = (
-            validation[
-                column
-            ]
-            .map(
-                loose_label_key
-            )
-            .map(
-                superclass_map
-            )
+        ] = validation[
+            column
+        ].apply(
+            lambda value:
+                map_label_to_superclass(
+                    value,
+                    superclass_map,
+                )[0]
+        )
+
+        # Optional audit: which alias group, if any, was applied?
+        validation[
+            f"{model}_alias_group"
+        ] = validation[
+            column
+        ].apply(
+            lambda value:
+                canonicalize_for_evaluation(
+                    value,
+                    return_rule=True,
+                )[1]
         )
 
 
@@ -1294,21 +1855,42 @@ def build_validation_dataset(
 
 
     validation[
-        "Fusion_superclass"
-    ] = (
-        validation[
-            FUSION_LABEL
-        ]
-        .map(
-            loose_label_key
-        )
-        .map(
-            superclass_map
-        )
+        "Fusion_alias_group"
+    ] = validation[
+        FUSION_LABEL
+    ].apply(
+        lambda value:
+            canonicalize_for_evaluation(
+                value,
+                return_rule=True,
+            )[1]
     )
 
 
-    # Expert evaluation representation
+    validation[
+        "Fusion_superclass"
+    ] = validation[
+        FUSION_LABEL
+    ].apply(
+        lambda value:
+            map_label_to_superclass(
+                value,
+                superclass_map,
+            )[0]
+    )
+
+
+    # Expert evaluation representation.  Keep both the strict normalized
+    # label and the requested alias-normalized evaluation label.
+    validation[
+        "expert_fine_strict"
+    ] = validation[
+        "expert_label_raw"
+    ].map(
+        normalized_text
+    )
+
+
     validation[
         "expert_fine_eval"
     ] = validation[
@@ -1455,8 +2037,111 @@ def build_validation_dataset(
 
 
 # ======================================================================
+# 13A. LABEL ALIAS AUDIT
+# ======================================================================
+
+
+def create_alias_audit(validation):
+    """
+    Produce a transparent record of every raw label -> evaluation-label
+    transformation for Expert, M1, M2, M3 and Fusion.
+    """
+
+    sources = [
+        ("Expert", EXPERT_LABEL_COL),
+        ("M1", MODEL_LABELS["M1"]),
+        ("M2", MODEL_LABELS["M2"]),
+        ("M3", MODEL_LABELS["M3"]),
+        ("Fusion", FUSION_LABEL),
+    ]
+
+    frames = []
+
+    for source_name, column in sources:
+
+        temp = pd.DataFrame({
+            "source": source_name,
+            "raw_label": validation[column],
+        })
+
+        results = temp[
+            "raw_label"
+        ].apply(
+            lambda value:
+                canonicalize_for_evaluation(
+                    value,
+                    return_rule=True,
+                )
+        )
+
+        temp[
+            "evaluation_label"
+        ] = results.map(
+            lambda x: x[0]
+        )
+
+        temp[
+            "alias_group"
+        ] = results.map(
+            lambda x: x[1]
+        )
+
+        temp[
+            "matched_alias"
+        ] = results.map(
+            lambda x: x[2]
+        )
+
+        frames.append(
+            temp
+        )
+
+    audit = pd.concat(
+        frames,
+        ignore_index=True,
+    )
+
+    summary = (
+        audit
+        .groupby(
+            [
+                "source",
+                "raw_label",
+                "evaluation_label",
+                "alias_group",
+                "matched_alias",
+            ],
+            dropna=False,
+        )
+        .size()
+        .reset_index(
+            name="n"
+        )
+        .sort_values(
+            [
+                "source",
+                "n",
+            ],
+            ascending=[
+                True,
+                False,
+            ],
+        )
+    )
+
+    summary.to_csv(
+        OUTPUT_DIR
+        / "label_alias_audit.csv",
+        index=False,
+    )
+
+    return summary
+
+
+# ======================================================================
 # 14. BASIC PERFORMANCE METRICS
 # ======================================================================
+
 
 def classification_metrics(
     y_true,
@@ -3830,7 +4515,7 @@ def plot_overall_performance(
 
 
     ax.set_ylabel(
-        "Fine-label agreement with expert (%)"
+        "Alias-normalized fine-label agreement with expert (%)"
     )
 
 
@@ -4043,7 +4728,7 @@ def plot_pathway_performance(
 
 
     ax.set_ylabel(
-        "Fine-label agreement with expert (%)"
+        "Alias-normalized fine-label agreement with expert (%)"
     )
 
 
@@ -4267,7 +4952,7 @@ def plot_superclass_performance(
 
 
     cbar.set_label(
-        "Exact fine-label agreement (%)"
+        "Alias-normalized fine-label agreement (%)"
     )
 
 
@@ -4533,7 +5218,7 @@ def plot_confidence(
 
 
     ax.set_ylabel(
-        "Fusion fine-label agreement with expert (%)"
+        "Alias-normalized fusion fine-label agreement with expert (%)"
     )
 
 
@@ -4956,7 +5641,7 @@ def write_text_report(
 
         lines.append(
             f"{row['method']:>7} | "
-            f"Fine accuracy={row['fine_accuracy_valid']*100:.2f}% | "
+            f"Alias-normalized fine accuracy={row['fine_accuracy_valid']*100:.2f}% | "
             f"Macro F1={row['fine_macro_f1']:.3f} | "
             f"Balanced acc={row['fine_balanced_accuracy']:.3f} | "
             f"Superclass acc={row['superclass_accuracy_valid']*100:.2f}%"
@@ -5133,9 +5818,19 @@ def main():
     )
 
 
+    alias_audit = create_alias_audit(
+        validation
+    )
+
+
     print(
         f"\nValidation table saved:"
         f"\n  {OUTPUT_DIR / 'validation_merged.csv'}"
+    )
+
+    print(
+        f"Alias audit saved:"
+        f"\n  {OUTPUT_DIR / 'label_alias_audit.csv'}"
     )
 
 
@@ -5528,6 +6223,10 @@ def main():
         "validation_merged.csv",
 
         "expert_label_mapping_report.csv",
+
+        "label_alias_audit.csv",
+
+        "model_label_alias_audit.csv",
 
         "overall_metrics_unweighted.csv",
 
