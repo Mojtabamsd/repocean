@@ -252,7 +252,7 @@ FUSION_PATH = "path"
 
 FUSION_CONFIDENCE = "confidence"
 
-
+SUPERCLASS_COLUMN = "superclass_taxo_20" #or "superclass_taxo_20" or "superclass_ecotaxa_20"
 # ======================================================================
 # 3. SAMPLING DESIGN
 # ======================================================================
@@ -325,7 +325,7 @@ LABEL_ALIAS_GROUPS = [
     # --------------------------------------------------------------
     {
         "group_id": 2,
-        "canonical": "copepoda",
+        "canonical": "calanoida",
         "priority": 0,
         "aliases": [
             "copepoda<multicrustacea",
@@ -388,7 +388,7 @@ LABEL_ALIAS_GROUPS = [
     # --------------------------------------------------------------
     {
         "group_id": 6,
-        "canonical": "Salpida",
+        "canonical": "salpida",
         "priority": 0,
         "aliases": [
             "chain<Salpida",
@@ -949,7 +949,7 @@ def load_superclass_map(path):
 
     required = {
         "label",
-        "superclass_ecotaxa_20",
+        SUPERCLASS_COLUMN,
     }
 
     missing = (
@@ -973,10 +973,10 @@ def load_superclass_map(path):
 
         superclass = (
             str(
-                row["superclass_ecotaxa_20"]
+                row[SUPERCLASS_COLUMN]
             ).strip()
             if not pd.isna(
-                row["superclass_ecotaxa_20"]
+                row[SUPERCLASS_COLUMN]
             )
             else None
         )
@@ -994,13 +994,44 @@ def load_superclass_map(path):
 def map_label_to_superclass(
     value,
     superclass_map,
+    prefer_alias=False,
 ):
     """
-    Map a label to ecotaxa_20 superclass.
+    Map a label to the ecotaxa_20 superclass.
 
-    First try the exact normalized raw label, because this preserves the
-    original sampling taxonomy.  If that is unavailable, try the requested
-    alias-normalized label.
+    Parameters
+    ----------
+    value : str
+        Raw label.
+
+    superclass_map : dict
+        Authoritative label -> ecotaxa_20 mapping loaded from label_to_int.csv.
+
+    prefer_alias : bool, default=False
+        If False, use the raw label first. This mode is required when
+        reconstructing the ORIGINAL sampling design, because sampling was
+        performed using the raw model-to-superclass mapping.
+
+        If True, first canonicalize the label using LABEL_ALIAS_GROUPS and
+        then map the CANONICAL evaluation label to ecotaxa_20. This mode is
+        used for expert-validation evaluation so that the superclass follows
+        the same alias grouping as the fine-label evaluation.
+
+    Why this distinction matters
+    ------------------------------
+    Example:
+
+        like<feces
+
+    is intentionally grouped with `detritus` for evaluation. If the raw
+    label_to_int.csv says `like<feces -> fiber`, using the raw mapping would
+    create an inconsistency:
+
+        fine-label evaluation: detritus
+        superclass evaluation: fiber
+
+    With prefer_alias=True, the label is first changed to `detritus` and
+    therefore receives the superclass of `detritus`.
     """
 
     raw = normalized_text(
@@ -1009,6 +1040,43 @@ def map_label_to_superclass(
 
     if raw is None:
         return None, "missing"
+
+    # ---------------------------------------------------------------
+    # EVALUATION MODE: alias/canonical label FIRST
+    # ---------------------------------------------------------------
+
+    if prefer_alias:
+
+        canonical, group_id, matched_alias = (
+            canonicalize_for_evaluation(
+                raw,
+                return_rule=True,
+            )
+        )
+
+        canonical_key = loose_label_key(
+            canonical
+        )
+
+        if (
+            canonical_key is not None
+            and canonical_key in superclass_map
+        ):
+            if group_id is not None:
+                return (
+                    superclass_map[canonical_key],
+                    f"alias_group_{group_id}"
+                    f"_via_{matched_alias}",
+                )
+
+            return (
+                superclass_map[canonical_key],
+                "canonical_label",
+            )
+
+    # ---------------------------------------------------------------
+    # RAW MODE, or evaluation fallback: exact raw label
+    # ---------------------------------------------------------------
 
     raw_key = loose_label_key(
         raw
@@ -1023,22 +1091,28 @@ def map_label_to_superclass(
             "raw_label",
         )
 
-    canonical = canonicalize_for_evaluation(
-        raw
-    )
+    # ---------------------------------------------------------------
+    # Final fallback for either mode
+    # ---------------------------------------------------------------
 
-    canonical_key = loose_label_key(
-        canonical
-    )
+    if not prefer_alias:
 
-    if (
-        canonical_key is not None
-        and canonical_key in superclass_map
-    ):
-        return (
-            superclass_map[canonical_key],
-            "alias_normalized",
+        canonical = canonicalize_for_evaluation(
+            raw
         )
+
+        canonical_key = loose_label_key(
+            canonical
+        )
+
+        if (
+            canonical_key is not None
+            and canonical_key in superclass_map
+        ):
+            return (
+                superclass_map[canonical_key],
+                "alias_normalized_fallback",
+            )
 
     return (
         None,
@@ -1304,6 +1378,7 @@ def map_expert_superclass(
     superclass, source = map_label_to_superclass(
         category,
         superclass_map,
+        prefer_alias=True,
     )
 
     if superclass is not None:
@@ -1326,6 +1401,7 @@ def map_expert_superclass(
         superclass, source = map_label_to_superclass(
             candidate,
             superclass_map,
+            prefer_alias=True,
         )
 
         if superclass is not None:
@@ -1806,9 +1882,12 @@ def build_validation_dataset(
         )
 
 
-        # Model superclass from the authoritative mapping.
-        # Raw label mapping is attempted first, followed by alias-aware
-        # fallback for equivalent composite labels.
+        # Model superclass for EVALUATION.
+        # Alias groups are applied FIRST so the superclass is consistent with
+        # the alias-normalized fine-label evaluation.
+        # The separate population-weighting function below deliberately keeps
+        # the original raw mapping because it must reconstruct the sampling
+        # design exactly.
         validation[
             f"{model}_superclass"
         ] = validation[
@@ -1818,7 +1897,22 @@ def build_validation_dataset(
                 map_label_to_superclass(
                     value,
                     superclass_map,
+                    prefer_alias=True,
                 )[0]
+        )
+
+        # Audit the mapping decision used for evaluation.
+        validation[
+            f"{model}_superclass_mapping_source"
+        ] = validation[
+            column
+        ].apply(
+            lambda value:
+                map_label_to_superclass(
+                    value,
+                    superclass_map,
+                    prefer_alias=True,
+                )[1]
         )
 
         # Optional audit: which alias group, if any, was applied?
@@ -1876,7 +1970,21 @@ def build_validation_dataset(
             map_label_to_superclass(
                 value,
                 superclass_map,
+                prefer_alias=True,
             )[0]
+    )
+
+    validation[
+        "Fusion_superclass_mapping_source"
+    ] = validation[
+        FUSION_LABEL
+    ].apply(
+        lambda value:
+            map_label_to_superclass(
+                value,
+                superclass_map,
+                prefer_alias=True,
+            )[1]
     )
 
 
@@ -2041,10 +2149,13 @@ def build_validation_dataset(
 # ======================================================================
 
 
-def create_alias_audit(validation):
+def create_alias_audit(validation, superclass_map):
     """
-    Produce a transparent record of every raw label -> evaluation-label
-    transformation for Expert, M1, M2, M3 and Fusion.
+    Produce a transparent record of every raw label -> evaluation label
+    transformation, including the superclass used for evaluation.
+
+    This audit is intentionally based on the VALIDATION mapping, where alias
+    groups are allowed to determine the evaluation superclass.
     """
 
     sources = [
@@ -2092,6 +2203,75 @@ def create_alias_audit(validation):
             lambda x: x[2]
         )
 
+        # The evaluation superclass MUST be derived from the same canonical
+        # alias grouping. For Expert we use the already computed expert
+        # superclass; for model/Fusion we use their evaluation superclass.
+        # -----------------------------------------------------------
+        # Raw superclass: exactly what label_to_int.csv says for the
+        # original label, WITHOUT alias harmonization.
+        # -----------------------------------------------------------
+        raw_sc_results = temp[
+            "raw_label"
+        ].apply(
+            lambda value:
+                map_label_to_superclass(
+                    value,
+                    superclass_map,
+                    prefer_alias=False,
+                )[0]
+        )
+
+        temp[
+            "raw_superclass"
+        ] = raw_sc_results.to_numpy()
+
+
+        if source_name == "Expert":
+            temp[
+                "evaluation_superclass"
+            ] = validation[
+                "expert_superclass"
+            ].to_numpy()
+
+            temp[
+                "superclass_mapping_source"
+            ] = validation[
+                "expert_superclass_mapping_source"
+            ].to_numpy()
+
+        elif source_name in {"M1", "M2", "M3"}:
+            temp[
+                "evaluation_superclass"
+            ] = validation[
+                f"{source_name}_superclass"
+            ].to_numpy()
+
+            temp[
+                "superclass_mapping_source"
+            ] = validation[
+                f"{source_name}_superclass_mapping_source"
+            ].to_numpy()
+
+        else:
+            temp[
+                "evaluation_superclass"
+            ] = validation[
+                "Fusion_superclass"
+            ].to_numpy()
+
+            temp[
+                "superclass_mapping_source"
+            ] = validation[
+                "Fusion_superclass_mapping_source"
+            ].to_numpy()
+
+        temp[
+            "superclass_changed_by_alias"
+        ] = (
+            temp["raw_superclass"].astype(str)
+            != temp["evaluation_superclass"].astype(str)
+        )
+
         frames.append(
             temp
         )
@@ -2110,6 +2290,10 @@ def create_alias_audit(validation):
                 "evaluation_label",
                 "alias_group",
                 "matched_alias",
+                "raw_superclass",
+                "evaluation_superclass",
+                "superclass_changed_by_alias",
+                "superclass_mapping_source",
             ],
             dropna=False,
         )
@@ -2132,6 +2316,19 @@ def create_alias_audit(validation):
     summary.to_csv(
         OUTPUT_DIR
         / "label_alias_audit.csv",
+        index=False,
+    )
+
+    # Special subset showing only records where alias grouping actually
+    # changed the label. This makes it easy to verify that, for example,
+    # like<feces -> detritus also receives detritus's superclass.
+    changed = summary[
+        summary["alias_group"].notna()
+    ].copy()
+
+    changed.to_csv(
+        OUTPUT_DIR
+        / "alias_superclass_audit.csv",
         index=False,
     )
 
@@ -3860,6 +4057,12 @@ def compute_model_inclusion_probability(
     ].copy()
 
 
+    # IMPORTANT: population-weight calculation reconstructs the ORIGINAL
+    # sampling design. The original sample was created from the raw model
+    # label -> superclass mapping, so alias normalization must NOT be used
+    # here. Evaluation superclass harmonization is applied only to the
+    # expert-validation metrics above.
+
     work[
         "sample_superclass"
     ] = (
@@ -4591,7 +4794,8 @@ def plot_overall_performance(
     )
 
 
-    plt.show()
+    # plt.show()
+    plt.close(fig)
 
 
 # ======================================================================
@@ -4778,7 +4982,8 @@ def plot_pathway_performance(
     )
 
 
-    plt.show()
+    # plt.show()
+    plt.close(fig)
 
 
 # ======================================================================
@@ -4991,7 +5196,8 @@ def plot_superclass_performance(
     )
 
 
-    plt.show()
+    # plt.show()
+    plt.close(fig)
 
 
 # ======================================================================
@@ -5128,8 +5334,8 @@ def plot_fusion_benefit(
     )
 
 
-    plt.show()
-
+    # plt.show()
+    plt.close(fig)
 
 # ======================================================================
 # 29. PLOT 5 — CONFIDENCE VALIDATION
@@ -5277,7 +5483,8 @@ def plot_confidence(
     )
 
 
-    plt.show()
+    # plt.show()
+    plt.close(fig)
 
 
 # ======================================================================
@@ -5418,7 +5625,8 @@ def plot_superclass_confusion(
     )
 
 
-    plt.show()
+    # plt.show()
+    plt.close(fig)
 
 
 # ======================================================================
@@ -5567,7 +5775,8 @@ def plot_weighted_vs_unweighted(
     )
 
 
-    plt.show()
+    # plt.show()
+    plt.close(fig)
 
 
 # ======================================================================
@@ -5819,7 +6028,8 @@ def main():
 
 
     alias_audit = create_alias_audit(
-        validation
+        validation,
+        superclass_map,
     )
 
 
@@ -6225,6 +6435,8 @@ def main():
         "expert_label_mapping_report.csv",
 
         "label_alias_audit.csv",
+
+        "alias_superclass_audit.csv",
 
         "model_label_alias_audit.csv",
 
